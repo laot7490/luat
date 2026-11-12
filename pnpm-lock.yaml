@@ -1,0 +1,21 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/luat: {}
+
+  packages/luat-darwin-arm64: {}
+
+  packages/luat-darwin-x64: {}
+
+  packages/luat-linux-arm64: {}
+
+  packages/luat-linux-x64: {}
+
+  packages/luat-win32-x64: {}
