@@ -15,13 +15,15 @@ LuaT is a Rust compiler and CLI for typed Lua targeting CfxLua. Core code lives 
 
 Run Rust commands from the repository root. The root pnpm workspace has no general test or lint script; use Cargo for compiler checks.
 
+Keep the repository root limited to its existing project files. Create a new root-level file or directory only when the task explicitly requires it; put source in the existing project structure and temporary or generated files under `target/`.
+
 ## Coding Style and Naming
 
 Use standard Rust formatting (four-space indentation) and keep modules focused by compiler, project, and CLI responsibilities. Use `snake_case` for Rust modules, functions, and variables; use descriptive test names that state the behavior under test. Keep fixture paths and Lua source representative of real project layouts. Avoid adding dependencies for functionality available in the existing Rust or workspace dependencies.
 
 ## Testing Guidelines
 
-Add Rust unit tests beside the implementation when practical, and integration tests under `tests/` for CLI or end-to-end project behavior. Put reusable project inputs under `tests/fixtures/`. Run the focused test while iterating, then `cargo test` before submitting. No coverage threshold is configured.
+Every new or changed feature and behavior must have Rust tests covering its expected behavior, invalid inputs, relevant edge cases, and regressions. Add unit tests beside the implementation in the existing Rust modules so Cargo discovers them. Keep temporary projects, fixtures, and generated test outputs under `target/tests/`; do not create a repository-root `tests/` directory. Run focused tests while iterating and `cargo test` before submitting.
 
 ## Commits and Pull Requests
 
