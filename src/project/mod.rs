@@ -377,7 +377,12 @@ impl Project {
                 declarations::validate_declaration(source)
                     .and_then(|()| check_source_with_declarations(source, &declarations))
             } else {
-                check_project_source(source, &declarations, true)
+                check_project_source(
+                    source,
+                    &declarations,
+                    true,
+                    plan.import_types.get(&file.input),
+                )
             };
             if let Err(error) = checked {
                 errors.push((file.input.clone(), error));
@@ -472,11 +477,16 @@ impl Project {
                 })?;
             return Ok(String::new());
         }
-        let compiled = compile_project_source(source, declarations, plan.resolved.get(&file.input))
-            .map_err(|error| BuildError::Compile {
-                path: file.input.clone(),
-                error,
-            })?;
+        let compiled = compile_project_source(
+            source,
+            declarations,
+            plan.resolved.get(&file.input),
+            plan.import_types.get(&file.input),
+        )
+        .map_err(|error| BuildError::Compile {
+            path: file.input.clone(),
+            error,
+        })?;
         if plan.wrapped.contains(&file.input) {
             let id = file
                 .output

@@ -4,7 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{Project, ProjectConfig};
+use super::{BuildError, Project, ProjectConfig};
+use crate::Diagnostic;
 
 fn temp_project() -> PathBuf {
     let id = SystemTime::now()
@@ -15,6 +16,19 @@ fn temp_project() -> PathBuf {
         .unwrap()
         .join("target")
         .join(format!("luat-test-{}-{id}", std::process::id()))
+}
+
+fn main_diagnostic(error: &BuildError) -> (&PathBuf, &Diagnostic) {
+    let errors = match error {
+        BuildError::Compile { path, error } => return (path, &error.diagnostics[0]),
+        BuildError::CompileMany(errors) => errors,
+        _ => panic!("expected a compile error: {error}"),
+    };
+    let (path, error) = errors
+        .iter()
+        .find(|(path, _)| path.ends_with("main.luat"))
+        .unwrap();
+    (path, &error.diagnostics[0])
 }
 
 #[test]
@@ -177,6 +191,110 @@ fn includes_transitive_imports_from_manifest_entries() {
     ] {
         assert!(root.join(path).exists(), "missing {path}");
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn checks_imported_table_function_and_reexport_signatures() {
+    for (module, call) in [
+        (
+            "src/shared/api.luat",
+            "return { Print = function(status: 'info' | 'warning', message: string) end }",
+        ),
+        (
+            "src/shared/api.luat",
+            "local api = {}\napi.Print = function(status: 'info' | 'warning', message: string) end\nreturn api",
+        ),
+        (
+            "src/shared/api.luat",
+            "type Level = 'info' | 'warning'\nreturn { Print = function(status: Level, message: string) end }",
+        ),
+        (
+            "src/shared/api.luat",
+            "return function(status: 'info' | 'warning', message: string) end",
+        ),
+        ("src/shared/api.luat", "return import('./nested')"),
+    ] {
+        let root = temp_project();
+        fs::create_dir_all(root.join("src/client")).unwrap();
+        fs::create_dir_all(root.join("src/shared")).unwrap();
+        fs::create_dir_all(root.join("src/shared/nested")).unwrap();
+        let target = if call.contains("nested") {
+            fs::write(
+                root.join("src/shared/nested.luat"),
+                "return { Print = function(status: 'info' | 'warning', message: string) end }",
+            )
+            .unwrap();
+            "cfg.Print('random', 'message')"
+        } else if call.contains("Print") {
+            "cfg.Print('random', 'message')"
+        } else {
+            "cfg('random', 'message')"
+        };
+        fs::write(root.join(module), call).unwrap();
+        let main_source =
+            format!("local text = `Merhaba {{1}}`\nlocal cfg = import('@/shared/api')\n{target}");
+        fs::write(root.join("src/client/main.luat"), &main_source).unwrap();
+        fs::write(
+            root.join("luat.toml"),
+            "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("dist/client")).unwrap();
+        fs::write(root.join("dist/client/main.lua"), "preserve me").unwrap();
+        let project = Project::load(&root).unwrap();
+        let check_error = project.check().expect_err(call);
+        let build_error = project.build().expect_err(call);
+        let (check_path, check_diagnostic) = main_diagnostic(&check_error);
+        let (build_path, build_diagnostic) = main_diagnostic(&build_error);
+        assert_eq!(check_path, build_path);
+        assert_eq!(check_diagnostic, build_diagnostic);
+        assert_eq!(check_diagnostic.code, "LT2002");
+        assert_eq!(
+            &main_source[check_diagnostic.source_range.clone()],
+            "'random'"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("dist/client/main.lua")).unwrap(),
+            "preserve me"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn resolves_exported_aliases_in_their_defining_module_and_keeps_import_runtime() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/shared/api.luat"),
+        "type Print = number\ntype Status = 'info' | 'warning'\ntype Message = { text: string }\ntype Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal api: Api<Message> = { Print = function(status: Status, message: Message) end }\nreturn api",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "type Print = string\ntype Status = number\ntype Message = { other: number }\ntype Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal cfg = import('@/shared/api')\ncfg.Print('info', { text = 'ready' })",
+    )
+    .unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+    )
+    .unwrap();
+    let project = Project::load(&root).unwrap();
+    assert!(project.check().is_ok());
+    project.build().unwrap();
+    assert!(
+        fs::read_to_string(root.join("dist/client/main.lua"))
+            .unwrap()
+            .contains("__luat.import")
+    );
+    assert!(
+        fs::read_to_string(root.join("dist/shared/api.lua"))
+            .unwrap()
+            .contains("__luat.register")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

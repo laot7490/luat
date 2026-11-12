@@ -43,13 +43,14 @@ pub(crate) fn compile_source_with_declarations(
     source: &str,
     declarations: &[String],
 ) -> Result<String, CompileError> {
-    compile_project_source(source, declarations, None)
+    compile_project_source(source, declarations, None, None)
 }
 
 pub(crate) fn compile_project_source(
     source: &str,
     declarations: &[String],
     imports: Option<&std::collections::HashMap<String, String>>,
+    import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<String, CompileError> {
     let prepared = syntax::prepare(source);
     let lua_version = LuaVersion::cfxlua().with_luau();
@@ -64,7 +65,7 @@ pub(crate) fn compile_project_source(
 
     let ast = parsed.into_ast();
     self::imports::analyze(source, &prepared, &ast, imports.is_some())?;
-    check_ast(source, &prepared, &ast, declarations)?;
+    check_ast(source, &prepared, &ast, declarations, import_types)?;
 
     let lowered = lower::lower(source, &prepared, &ast)?;
     let lowered = if let Some(imports) = imports {
@@ -79,13 +80,21 @@ pub(crate) fn check_source_with_declarations(
     source: &str,
     declarations: &[String],
 ) -> Result<(), CompileError> {
-    check_project_source(source, declarations, false)
+    check_project_source(source, declarations, false, None)
+}
+
+pub(crate) fn infer_module_export_type(
+    source: &str,
+    import_types: &std::collections::HashMap<String, String>,
+) -> String {
+    typecheck::infer_module_export_type(source, import_types)
 }
 
 pub(crate) fn check_project_source(
     source: &str,
     declarations: &[String],
     project_context: bool,
+    import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), CompileError> {
     let prepared = syntax::prepare(source);
     let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
@@ -98,7 +107,7 @@ pub(crate) fn check_project_source(
     }
     let ast = parsed.into_ast();
     imports::analyze(source, &prepared, &ast, project_context)?;
-    check_ast(source, &prepared, &ast, declarations)
+    check_ast(source, &prepared, &ast, declarations, import_types)
 }
 
 pub(crate) fn collect_imports(source: &str) -> Result<Vec<imports::ImportCall>, CompileError> {
@@ -119,8 +128,10 @@ fn check_ast(
     prepared: &syntax::PreparedSource,
     ast: &full_moon::ast::Ast,
     declarations: &[String],
+    import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), CompileError> {
-    let diagnostics = typecheck::check(source, prepared, ast, declarations);
+    let diagnostics =
+        typecheck::check_with_imports(source, prepared, ast, declarations, import_types);
     if diagnostics.is_empty() {
         Ok(())
     } else {

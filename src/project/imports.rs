@@ -10,6 +10,7 @@ use crate::compiler::{
 pub(super) struct ImportPlan {
     pub texts: HashMap<PathBuf, String>,
     pub resolved: HashMap<PathBuf, HashMap<String, String>>,
+    pub import_types: HashMap<PathBuf, HashMap<String, String>>,
     pub wrapped: HashSet<PathBuf>,
     pub scripts: Option<[Vec<String>; 3]>,
     pub entries: Vec<(PathBuf, String)>,
@@ -353,6 +354,34 @@ impl Project {
         let mut complete = HashSet::new();
         for id in modules.keys() {
             visit_cycle(id, &modules, &mut complete)?;
+        }
+
+        let mut export_types = HashMap::<String, String>::new();
+        while export_types.len() < modules.len() {
+            let mut progressed = false;
+            for (id, module) in &modules {
+                if export_types.contains_key(id)
+                    || module
+                        .edges
+                        .iter()
+                        .any(|(_, target)| !export_types.contains_key(target))
+                {
+                    continue;
+                }
+                let import_types = module
+                    .edges
+                    .iter()
+                    .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
+                    .collect::<HashMap<_, _>>();
+                let export_type =
+                    crate::compiler::infer_module_export_type(&module.source, &import_types);
+                plan.import_types.insert(module.path.clone(), import_types);
+                export_types.insert(id.clone(), export_type);
+                progressed = true;
+            }
+            if !progressed {
+                break;
+            }
         }
 
         let mut declared = HashMap::<String, u8>::new();

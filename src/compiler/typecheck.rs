@@ -290,6 +290,7 @@ impl Visitor for AliasCollector {
 struct TypeChecker<'a> {
     source: &'a str,
     prepared: &'a PreparedSource,
+    import_types: Option<&'a HashMap<String, String>>,
     aliases: HashMap<String, TypeAlias>,
     alias_scope_changes: Vec<Vec<(String, Option<TypeAlias>)>>,
     functions: HashMap<String, FunctionSignature>,
@@ -298,6 +299,7 @@ struct TypeChecker<'a> {
     repeat_scope_pending: usize,
     return_types: Vec<Option<String>>,
     function_names: Vec<String>,
+    module_returns: Vec<String>,
     function_scope_changes: Vec<Vec<(String, Option<FunctionSignature>)>>,
     pending_local_bindings: Vec<HashMap<String, String>>,
     diagnostics: Vec<Diagnostic>,
@@ -310,6 +312,32 @@ struct FunctionSignature {
     returns: ValuePack,
     vararg: Option<String>,
     generic_parameters: Vec<String>,
+}
+
+impl FunctionSignature {
+    fn type_name(&self) -> String {
+        let parameters = self
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                format!(
+                    "{}: {ty}",
+                    self.parameter_names
+                        .get(index)
+                        .map_or("parameter", String::as_str)
+                )
+            })
+            .chain(self.vararg.iter().map(|ty| format!("...: {ty}")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let generics = if self.generic_parameters.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.generic_parameters.join(", "))
+        };
+        format!("{generics}({parameters}) -> {}", self.returns.type_name())
+    }
 }
 
 #[derive(Default)]
@@ -340,6 +368,10 @@ impl Visitor for FunctionCollector {
     fn visit_function_declaration(&mut self, node: &ast::FunctionDeclaration) {
         self.add_ast(node.name().to_string(), node.body());
     }
+
+    fn visit_anonymous_function(&mut self, node: &ast::AnonymousFunction) {
+        self.add_ast("<anonymous>".to_owned(), node.body());
+    }
 }
 
 impl FunctionCollector {
@@ -359,7 +391,8 @@ impl FunctionCollector {
     }
 
     fn add_ast(&mut self, name: String, body: &ast::FunctionBody) {
-        if name.is_empty() || name.contains(['.', ':']) {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
             return;
         }
         let mut parameter_names = Vec::new();
@@ -582,7 +615,27 @@ impl TypeChecker<'_> {
             }
         }
         if expression.starts_with("function") {
+            let parsed = full_moon::parse_fallible(
+                &format!("local __luat_value = {expression}"),
+                LuaVersion::cfxlua().with_luau(),
+            );
+            if parsed.errors().is_empty() {
+                let mut collector = FunctionCollector::default();
+                collector.visit_ast(&parsed.into_ast());
+                if let Some(signature) = collector.functions.get("<anonymous>") {
+                    return signature.type_name();
+                }
+            }
             return "function".to_owned();
+        }
+        if let Some(specifier) = expression
+            .strip_prefix("import(")
+            .and_then(|value| value.strip_suffix(')'))
+            .map(str::trim)
+            .map(|value| value.trim_matches(['\'', '"']))
+            && let Some(ty) = self.import_types.and_then(|types| types.get(specifier))
+        {
+            return ty.clone();
         }
         if let Some(ty) = self
             .scopes
@@ -616,7 +669,9 @@ impl TypeChecker<'_> {
             return "any".to_owned();
         }
         if expression.starts_with('{') {
-            return "table".to_owned();
+            return self
+                .infer_table_literal_type(expression)
+                .unwrap_or_else(|| "table".to_owned());
         }
         if expression.starts_with(['\'', '"']) {
             return "string".to_owned();
@@ -626,6 +681,11 @@ impl TypeChecker<'_> {
 
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
         match expression {
+            Expression::Function(function) => {
+                let mut collector = FunctionCollector::default();
+                collector.add_ast("<anonymous>".to_owned(), function.body());
+                collector.functions["<anonymous>"].type_name()
+            }
             Expression::IfExpression(value) => {
                 let mut types = vec![self.infer_ast_expression_type(value.if_expression())];
                 if let Some(else_ifs) = value.else_if_expressions() {
@@ -921,7 +981,7 @@ impl TypeChecker<'_> {
     fn infer_table_literal_type(&self, expression: &str) -> Option<String> {
         let parts = actual_table_fields(expression, &|value| self.infer_expression_type(value))?;
         if parts.is_empty() {
-            return None;
+            return Some("{}".to_owned());
         }
         let mut named_fields = Vec::new();
         let mut array_items = Vec::new();
@@ -962,6 +1022,39 @@ impl TypeChecker<'_> {
             array_items = vec!["number".to_owned()];
         }
         Some(format!("{{ {} }}", array_items.join(" | ")))
+    }
+
+    fn remember_function(&mut self, name: String, signature: Option<FunctionSignature>) {
+        let previous = if let Some(signature) = signature {
+            self.functions.insert(name.clone(), signature)
+        } else {
+            self.functions.remove(&name)
+        };
+        if let Some(scope) = self.function_scope_changes.last_mut() {
+            scope.push((name, previous));
+        }
+    }
+
+    fn collect_table_functions(&mut self, name: &str, expression: &Expression) {
+        let Expression::TableConstructor(table) = expression else {
+            return;
+        };
+        for field in table.fields() {
+            let (key, value) = match field {
+                ast::Field::NameKey { key, value, .. } => (key.token().to_string(), value),
+                _ => continue,
+            };
+            let field_name = format!("{name}.{key}");
+            if let Expression::Function(function) = value.as_ref() {
+                let mut collector = FunctionCollector::default();
+                collector.add_ast(field_name.clone(), function.body());
+                if let Some(signature) = collector.functions.remove(&field_name) {
+                    self.remember_function(field_name, Some(signature));
+                }
+            } else {
+                self.collect_table_functions(&field_name, value);
+            }
+        }
     }
 }
 
@@ -1291,6 +1384,15 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_return(&mut self, node: &ast::Return) {
+        if self.function_names.is_empty() {
+            self.module_returns.push(
+                node.returns()
+                    .iter()
+                    .next()
+                    .map(|value| infer_export_expression_type(self, value))
+                    .unwrap_or_else(|| "nil".to_owned()),
+            );
+        }
         let Some(expected) = self.return_types.last().and_then(Option::as_ref) else {
             return;
         };
@@ -1395,45 +1497,140 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_function_call(&mut self, node: &ast::FunctionCall) {
-        let call = node.to_string();
-        let Some(open) = call.find('(') else {
+        let suffixes = node.suffixes().collect::<Vec<_>>();
+        let Some((last, suffix)) = suffixes.iter().enumerate().last() else {
             return;
         };
-        let Some(close) = matching_delimiter(&call, open, '(', ')') else {
-            return;
+        let mut name = node.prefix().to_string();
+        for suffix in &suffixes[..last] {
+            name.push_str(&suffix.to_string());
+        }
+        let arguments = match suffix {
+            ast::Suffix::Call(ast::Call::AnonymousCall(arguments)) => arguments.as_ref(),
+            ast::Suffix::Call(ast::Call::MethodCall(method)) => {
+                name.push(':');
+                name.push_str(&method.name().token().to_string());
+                method.args()
+            }
+            _ => return,
         };
-        let name = call[..open].trim();
-        let args = split_top_level(&call[open + 1..close], ',');
+        let name = name.trim();
+        let argument_nodes = match arguments {
+            ast::FunctionArgs::Parentheses { arguments, .. } => {
+                arguments.iter().collect::<Vec<_>>()
+            }
+            ast::FunctionArgs::String(_) | ast::FunctionArgs::TableConstructor(_) => Vec::new(),
+            _ => Vec::new(),
+        };
+        let args = match arguments {
+            ast::FunctionArgs::Parentheses { arguments, .. } => arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ast::FunctionArgs::String(_) | ast::FunctionArgs::TableConstructor(_) => {
+                vec![arguments.to_string()]
+            }
+            _ => Vec::new(),
+        };
+        let argument_start = arguments
+            .start_position()
+            .map(|position| {
+                position.bytes()
+                    - node
+                        .start_position()
+                        .map(|position| position.bytes())
+                        .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let field_access = split_known_field_access(name);
+        let signature = self
+            .functions
+            .get(name)
+            .cloned()
+            .or_else(|| {
+                field_access.and_then(|(receiver, field, _)| {
+                    self.functions.get(&format!("{receiver}.{field}")).cloned()
+                })
+            })
+            .or_else(|| parse_function_type(&self.infer_expression_type(name)));
         if self
             .scopes
             .iter()
             .rev()
             .any(|scope| scope.contains_key(name))
+            && signature.is_none()
         {
+            let local_type = self.scopes.iter().rev().find_map(|scope| scope.get(name));
+            if local_type.is_some_and(|ty| ty != "any") {
+                let byte = node
+                    .start_position()
+                    .map(|position| position.bytes())
+                    .unwrap_or_default();
+                self.diagnostics.push(Diagnostic::at(
+                    self.source,
+                    self.prepared.original_offset(byte),
+                    name.chars().count().max(1),
+                    "LT2008",
+                    format!(
+                        "Value '{name}' of type '{}' is not callable.",
+                        local_type.unwrap()
+                    ),
+                ));
+            }
             return;
         }
-        let Some(signature) = self.functions.get(name).cloned() else {
+        if let Some((receiver, field, _)) = field_access
+            && self.is_known_record(receiver)
+            && self.infer_field_type(receiver, field, false).is_none()
+        {
+            let byte = node
+                .start_position()
+                .map(|position| position.bytes())
+                .unwrap_or_default();
+            self.diagnostics.push(Diagnostic::at(
+                self.source,
+                self.prepared.original_offset(byte),
+                name.chars().count().max(1),
+                "LT2005",
+                format!(
+                    "Type '{}' has no field '{field}' in expression '{name}'.",
+                    self.infer_expression_type(receiver)
+                ),
+            ));
+            return;
+        }
+        let Some(signature) = signature else {
+            let value_type = self.infer_expression_type(name);
+            if value_type != "any" && value_type != "function" {
+                let byte = node
+                    .start_position()
+                    .map(|position| position.bytes())
+                    .unwrap_or_default();
+                self.diagnostics.push(Diagnostic::at(
+                    self.source,
+                    self.prepared.original_offset(byte),
+                    name.chars().count().max(1),
+                    "LT2008",
+                    format!("Value '{name}' of type '{value_type}' is not callable."),
+                ));
+            }
             return;
         };
-        let argument_nodes = node
-            .suffixes()
-            .filter_map(|suffix| match suffix {
-                ast::Suffix::Call(ast::Call::AnonymousCall(arguments)) => {
-                    match arguments.as_ref() {
-                        ast::FunctionArgs::Parentheses { arguments, .. } => {
-                            Some(arguments.iter().collect::<Vec<_>>())
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            })
-            .last()
-            .unwrap_or_default();
+        let argument_texts = args.iter().map(String::as_str).collect::<Vec<_>>();
         let mut expanded_args = Vec::new();
         let mut has_unknown_argument_count = false;
         for (index, argument) in args.iter().enumerate() {
-            let offset = argument.as_ptr() as usize - call.as_ptr() as usize;
+            let offset = argument_nodes
+                .get(index)
+                .and_then(Node::start_position)
+                .map(|position| {
+                    position.bytes()
+                        - node
+                            .start_position()
+                            .map(|position| position.bytes())
+                            .unwrap_or_default()
+                })
+                .unwrap_or(argument_start);
             let pack = argument_nodes.get(index).map_or_else(
                 || ValuePack::single(self.infer_expression_type(argument)),
                 |expression| self.expression_value_pack(expression, index + 1 == args.len()),
@@ -1451,7 +1648,7 @@ impl Visitor for TypeChecker<'_> {
                 expanded_args.push(("nil".to_owned(), "nil".to_owned(), 0));
             }
         }
-        let bindings = generic_bindings(&signature, &args, self);
+        let bindings = generic_bindings(&signature, &argument_texts, self);
         for (index, ((actual, actual_type, argument_offset), expected)) in
             expanded_args.iter().zip(&signature.parameters).enumerate()
         {
@@ -1522,7 +1719,7 @@ impl Visitor for TypeChecker<'_> {
             }
         }
         if let Some(expected) = signature.vararg.as_deref() {
-            for (index, (actual, actual_type, _)) in expanded_args
+            for (index, (actual, actual_type, argument_offset)) in expanded_args
                 .iter()
                 .enumerate()
                 .skip(signature.parameters.len())
@@ -1530,10 +1727,9 @@ impl Visitor for TypeChecker<'_> {
                 if is_assignable(actual_type, expected, &self.aliases, &mut Vec::new())
                     == Some(false)
                 {
-                    let start = call.find(actual).unwrap_or_default();
                     self.diagnostics.push(Diagnostic::at(
                         self.source,
-                        self.prepared.original_offset(node.start_position().map(|p| p.bytes()).unwrap_or_default() + start),
+                        self.prepared.original_offset(node.start_position().map(|p| p.bytes()).unwrap_or_default() + argument_offset),
                         actual.chars().count().max(1),
                         "LT2002",
                         format!("Argument {} of function '{name}': type '{actual_type}' is not assignable to vararg type '{expected}'.", index + 1),
@@ -1633,6 +1829,27 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_local_assignment(&mut self, node: &ast::LocalAssignment) {
+        let signatures = node
+            .names()
+            .iter()
+            .zip(node.expressions())
+            .map(|(name, expression)| {
+                let signature = if let Expression::Function(function) = expression {
+                    let mut collector = FunctionCollector::default();
+                    collector.add_ast(name.to_string().trim().to_owned(), function.body());
+                    collector.functions.remove(name.to_string().trim())
+                } else {
+                    self.functions.get(expression.to_string().trim()).cloned()
+                };
+                (name.to_string().trim().to_owned(), signature)
+            })
+            .collect::<Vec<_>>();
+        for (name, signature) in signatures {
+            self.remember_function(name, signature);
+        }
+        for (name, expression) in node.names().iter().zip(node.expressions()) {
+            self.collect_table_functions(name.to_string().trim(), expression);
+        }
         let mut pending_bindings = HashMap::new();
         let expressions: Vec<_> = node.expressions().iter().cloned().collect();
         let (values, _) = self.expression_list_values(&expressions, node.names().len());
@@ -1699,7 +1916,7 @@ impl Visitor for TypeChecker<'_> {
                 .flatten();
             let inferred_type = widen_inferred_type(&actual_type);
             if let Some(ty) = expected.or(inferred_table_type).or(Some(inferred_type)) {
-                pending_bindings.insert(name, ty);
+                pending_bindings.insert(name.clone(), ty);
             }
         }
         self.pending_local_bindings.push(pending_bindings);
@@ -1721,6 +1938,21 @@ impl Visitor for TypeChecker<'_> {
             let target_name = target_source.trim();
             let (actual_type, value) = values[index].clone();
             let actual_source = value.map_or_else(|| "nil".to_owned(), ToString::to_string);
+            if let Some(value) = value {
+                let function_name = split_known_field_access(target_name)
+                    .map(|(receiver, field, _)| format!("{receiver}.{field}"))
+                    .unwrap_or_else(|| target_name.to_owned());
+                if let Expression::Function(function) = value {
+                    let mut collector = FunctionCollector::default();
+                    collector.add_ast(function_name.clone(), function.body());
+                    if let Some(signature) = collector.functions.remove(&function_name) {
+                        self.remember_function(function_name, Some(signature));
+                    }
+                } else {
+                    let signature = self.functions.get(value.to_string().trim()).cloned();
+                    self.remember_function(function_name, signature);
+                }
+            }
             let expected = split_property_access(target_name)
                 .and_then(|(receiver, field, optional)| {
                     self.infer_field_type(receiver, field, optional)
@@ -1787,9 +2019,63 @@ impl Visitor for TypeChecker<'_> {
             } else if is_identifier(target_name) && actual_type != "any" {
                 let inferred_type = self
                     .infer_table_literal_type(&actual_source)
-                    .unwrap_or(actual_type);
+                    .unwrap_or_else(|| actual_type.clone());
                 if let Some(scope) = self.scopes.last_mut() {
                     scope.insert(target_name.to_owned(), inferred_type);
+                }
+            }
+            if let Some((receiver, field, _)) = split_known_field_access(target_name) {
+                let receiver_type = self.infer_expression_type(receiver);
+                if receiver_type == "table" || receiver_type.starts_with('{') {
+                    let function_name = format!("{receiver}.{field}");
+                    let field_type = self
+                        .functions
+                        .get(&function_name)
+                        .map(FunctionSignature::type_name)
+                        .unwrap_or(actual_type);
+                    let updated = if receiver_type == "table" {
+                        format!("{{ {field}: {field_type} }}")
+                    } else if let Some(body) = receiver_type
+                        .strip_prefix('{')
+                        .and_then(|ty| ty.strip_suffix('}'))
+                    {
+                        let fields = split_table_type_fields(body);
+                        if fields.iter().any(|existing| {
+                            existing
+                                .split_once(':')
+                                .is_some_and(|(name, _)| name.trim() == field)
+                        }) {
+                            format!(
+                                "{{ {} }}",
+                                fields
+                                    .into_iter()
+                                    .map(|existing| {
+                                        if existing
+                                            .split_once(':')
+                                            .is_some_and(|(name, _)| name.trim() == field)
+                                        {
+                                            format!("{field}: {field_type}")
+                                        } else {
+                                            existing.to_owned()
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        } else {
+                            format!("{{ {}, {field}: {field_type} }}", body.trim())
+                        }
+                    } else {
+                        receiver_type.clone()
+                    };
+                    if let Some(scope) = self
+                        .scopes
+                        .iter_mut()
+                        .rev()
+                        .find(|scope| scope.contains_key(receiver))
+                    {
+                        scope.insert(receiver.to_owned(), updated);
+                    }
                 }
             }
         }
@@ -1856,6 +2142,65 @@ fn split_property_access(expression: &str) -> Option<(&str, &str, bool)> {
     let index = expression.rfind('.')?;
     let field = expression[index + 1..].trim();
     is_identifier(field).then(|| (expression[..index].trim(), field, false))
+}
+
+fn split_known_field_access(expression: &str) -> Option<(&str, &str, bool)> {
+    split_property_access(expression).or_else(|| {
+        split_index_access(expression).and_then(|(receiver, key)| {
+            let key = key.trim().trim_matches(['\'', '"']);
+            is_identifier(key).then_some((receiver, key, false))
+        })
+    })
+}
+
+fn parse_function_type(type_name: &str) -> Option<FunctionSignature> {
+    let (parameters_and_generics, returns) = type_name.rsplit_once("->")?;
+    let parameters_and_generics = parameters_and_generics.trim();
+    let generic_parameters = parameters_and_generics
+        .strip_prefix('<')
+        .and_then(|value| value.find('>').map(|end| value[1..end].to_owned()))
+        .map(|value| {
+            split_top_level(&value, ',')
+                .iter()
+                .map(|part| part.trim().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let open = parameters_and_generics.find('(')?;
+    let close = matching_delimiter(parameters_and_generics, open, '(', ')')?;
+    if close != parameters_and_generics.len() - 1 {
+        return None;
+    }
+    let mut parameter_names = Vec::new();
+    let mut parameters = Vec::new();
+    let mut vararg = None;
+    for (index, parameter) in split_top_level(&parameters_and_generics[open + 1..close], ',')
+        .into_iter()
+        .enumerate()
+    {
+        let parameter = parameter.trim();
+        let (name, ty) = parameter
+            .split_once(':')
+            .map(|(name, ty)| (name.trim(), ty.trim()))
+            .unwrap_or(("parameter", parameter));
+        if name == "..." {
+            vararg = Some(ty.to_owned());
+        } else {
+            parameter_names.push(if name == "parameter" {
+                format!("parameter{index}")
+            } else {
+                name.to_owned()
+            });
+            parameters.push(ty.to_owned());
+        }
+    }
+    Some(FunctionSignature {
+        parameter_names,
+        parameters,
+        returns: ValuePack::from_type(returns.trim()),
+        vararg,
+        generic_parameters,
+    })
 }
 
 fn split_index_access(expression: &str) -> Option<(&str, &str)> {
@@ -2777,11 +3122,185 @@ fn split_once_top_level(input: &str, separator: char) -> Option<(&str, &str)> {
     None
 }
 
+fn infer_export_expression_type(checker: &TypeChecker<'_>, expression: &Expression) -> String {
+    match expression {
+        Expression::Function(function) => {
+            let mut collector = FunctionCollector::default();
+            collector.add_ast("<anonymous>".to_owned(), function.body());
+            collector.functions["<anonymous>"].type_name()
+        }
+        Expression::TableConstructor(table) => {
+            let fields = table
+                .fields()
+                .iter()
+                .filter_map(|field| match field {
+                    ast::Field::NameKey { key, value, .. } => Some(format!(
+                        "{}: {}",
+                        key.token(),
+                        infer_export_expression_type(checker, value)
+                    )),
+                    ast::Field::ExpressionKey { key, value, .. } => {
+                        let key = key.to_string();
+                        let field = key.trim().trim_matches(['\'', '"']);
+                        is_identifier(field).then(|| {
+                            format!("{field}: {}", infer_export_expression_type(checker, value))
+                        })
+                    }
+                    ast::Field::SetConstructor { name, .. } => {
+                        Some(format!("{}: true", name.token()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                "table".to_owned()
+            } else {
+                format!("{{ {} }}", fields.join(", "))
+            }
+        }
+        _ => checker.infer_ast_expression_type(expression),
+    }
+}
+
+fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>) -> String {
+    fn expand(
+        type_name: &str,
+        aliases: &HashMap<String, TypeAlias>,
+        generics: &[String],
+        seen: &mut HashSet<String>,
+    ) -> String {
+        let type_name = type_name.trim();
+        if generics.iter().any(|generic| generic == type_name) {
+            return type_name.to_owned();
+        }
+        if let Some(base) = type_name.strip_suffix('?') {
+            return format!("{}?", expand(base, aliases, generics, seen));
+        }
+        let members = split_union(type_name);
+        if members.len() > 1 {
+            return members
+                .into_iter()
+                .map(|member| expand(member, aliases, generics, seen))
+                .collect::<Vec<_>>()
+                .join(" | ");
+        }
+        if let Some(expanded) = resolve_alias(type_name, aliases)
+            && seen.insert(type_name.to_owned())
+        {
+            let expanded = expand(&expanded, aliases, generics, seen);
+            seen.remove(type_name);
+            return expanded;
+        }
+        if let Some(body) = type_name
+            .strip_prefix('{')
+            .and_then(|body| body.strip_suffix('}'))
+        {
+            let fields = split_table_type_fields(body)
+                .into_iter()
+                .map(|field| {
+                    let Some((name, ty)) = split_once_top_level(field, ':') else {
+                        return expand(field, aliases, generics, seen);
+                    };
+                    let name = name.trim();
+                    let name = if let Some(key) =
+                        name.strip_prefix('[').and_then(|key| key.strip_suffix(']'))
+                    {
+                        format!("[{}]", expand(key, aliases, generics, seen))
+                    } else {
+                        name.to_owned()
+                    };
+                    format!("{name}: {}", expand(ty, aliases, generics, seen))
+                })
+                .collect::<Vec<_>>();
+            return format!("{{ {} }}", fields.join(", "));
+        }
+        if let Some((parameters, returns)) = split_once_top_level(type_name, '-')
+            && let Some(returns) = returns.trim().strip_prefix('>')
+        {
+            let mut nested_generics = generics.to_vec();
+            let parameters = parameters.trim();
+            let parameters = if let Some(declaration) = parameters
+                .strip_prefix('<')
+                .and_then(|value| value.find('>').map(|end| &value[..end + 1]))
+            {
+                nested_generics.extend(
+                    declaration
+                        .trim_matches(['<', '>'])
+                        .split(',')
+                        .map(|generic| generic.trim().to_owned()),
+                );
+                parameters[declaration.len()..].trim()
+            } else {
+                parameters
+            };
+            if let Some(open) = parameters.find('(')
+                && matching_delimiter(parameters, open, '(', ')') == Some(parameters.len() - 1)
+            {
+                let values = split_top_level(&parameters[open + 1..parameters.len() - 1], ',')
+                    .into_iter()
+                    .map(|parameter| {
+                        if let Some((name, ty)) = split_once_top_level(parameter, ':') {
+                            format!(
+                                "{}: {}",
+                                name.trim(),
+                                expand(ty, aliases, &nested_generics, seen)
+                            )
+                        } else {
+                            expand(parameter, aliases, &nested_generics, seen)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                return format!(
+                    "{}({}) -> {}",
+                    parameters[..open].trim(),
+                    values.join(", "),
+                    expand(returns, aliases, &nested_generics, seen)
+                );
+            }
+        }
+        if type_name.starts_with('(') && type_name.ends_with(')') {
+            return format!(
+                "({})",
+                split_top_level(&type_name[1..type_name.len() - 1], ',')
+                    .into_iter()
+                    .map(|part| expand(part, aliases, generics, seen))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if let Some((base, arguments)) = generic_type_parts(type_name) {
+            return format!(
+                "{}<{}>",
+                base,
+                arguments
+                    .into_iter()
+                    .map(|argument| expand(argument, aliases, generics, seen))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        type_name.to_owned()
+    }
+
+    expand(&type_name, aliases, &[], &mut HashSet::new())
+}
+
+#[cfg(test)]
 pub(crate) fn check(
     source: &str,
     prepared: &PreparedSource,
     ast: &full_moon::ast::Ast,
     declarations: &[String],
+) -> Vec<Diagnostic> {
+    check_with_imports(source, prepared, ast, declarations, None)
+}
+
+pub(crate) fn check_with_imports(
+    source: &str,
+    prepared: &PreparedSource,
+    ast: &full_moon::ast::Ast,
+    declarations: &[String],
+    import_types: Option<&HashMap<String, String>>,
 ) -> Vec<Diagnostic> {
     let mut consts = ConstChecker {
         source,
@@ -2852,6 +3371,7 @@ pub(crate) fn check(
     let mut checker = TypeChecker {
         source,
         prepared,
+        import_types,
         aliases: checker_aliases,
         alias_scope_changes: Vec::new(),
         functions: {
@@ -2865,10 +3385,65 @@ pub(crate) fn check(
         repeat_scope_pending: 0,
         return_types: Vec::new(),
         function_names: Vec::new(),
+        module_returns: Vec::new(),
         function_scope_changes: Vec::new(),
         pending_local_bindings: Vec::new(),
         diagnostics: Vec::new(),
     };
     checker.visit_ast(ast);
     checker.diagnostics
+}
+
+pub(crate) fn infer_module_export_type(
+    source: &str,
+    import_types: &HashMap<String, String>,
+) -> String {
+    let prepared = crate::compiler::syntax::prepare(source);
+    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
+    if !parsed.errors().is_empty() {
+        return "any".to_owned();
+    }
+    let ast = parsed.into_ast();
+    let mut aliases = AliasCollector {
+        aliases: HashMap::new(),
+    };
+    aliases.visit_ast(&ast);
+    let mut functions = FunctionCollector::default();
+    functions.add_vector_constructors();
+    functions.visit_ast(&ast);
+    let mut checker = TypeChecker {
+        source,
+        prepared: &prepared,
+        import_types: Some(import_types),
+        aliases: aliases.aliases,
+        alias_scope_changes: Vec::new(),
+        functions: functions.functions,
+        scopes: vec![HashMap::new()],
+        block_scopes: Vec::new(),
+        repeat_scope_pending: 0,
+        return_types: Vec::new(),
+        function_names: Vec::new(),
+        module_returns: Vec::new(),
+        function_scope_changes: Vec::new(),
+        pending_local_bindings: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    checker.visit_ast(&ast);
+    let mut types = checker
+        .module_returns
+        .into_iter()
+        .map(|type_name| {
+            expand_export_aliases(
+                resolve_optional_base_type(&type_name, &checker.aliases).0,
+                &checker.aliases,
+            )
+        })
+        .collect::<Vec<_>>();
+    types.sort();
+    types.dedup();
+    match types.as_slice() {
+        [] => "nil".to_owned(),
+        [single] => single.clone(),
+        _ => types.join(" | "),
+    }
 }

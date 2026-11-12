@@ -769,6 +769,203 @@ fn checks_known_function_calls_and_ignores_unknown_external_calls() {
 }
 
 #[test]
+fn checks_anonymous_function_values_and_table_fields() {
+    for (source, expected) in [
+        (
+            "local emit = function(status: 'info' | 'warning', message: string) end\nemit('random', 'message')",
+            "LT2002",
+        ),
+        (
+            "local Config = {}\nConfig.Print = function(status: 'info' | 'warning', message: string) end\nConfig.Print('random', 'message')",
+            "LT2002",
+        ),
+        (
+            "local Config = {}\nConfig.Print = function(status: 'info' | 'warning', message: string) end\nConfig.Print('info')",
+            "LT2002",
+        ),
+        (
+            "local Config = {}\nConfig.Print = function(status: 'info' | 'warning', message: string) end\nConfig.print('info', 'message')",
+            "LT2005",
+        ),
+    ] {
+        let prepared = prepare(source);
+        let ast = full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
+        let diagnostics = check(source, &prepared, &ast, &[]);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn preserves_anonymous_function_signatures_through_local_references() {
+    for source in [
+        "local emit = function(status: 'info' | 'warning', message: string) end\nlocal copy = emit\ncopy('random', 'message')",
+        "local emit\n emit = function(status: 'info' | 'warning', message: string) end\nemit('random', 'message')",
+        "local Config = { Print = function(status: 'info' | 'warning', message: string) end }\nConfig.Print('random', 'message')",
+        "local Config = { nested = { Print = function(status: 'info' | 'warning', message: string) end } }\nConfig.nested.Print('random', 'message')",
+        "local Config = { Print = function(status: 'info' | 'warning', message: string) end }\nConfig['Print']('random', 'message')",
+        "local Config = {}\nfunction Config:Print(status: 'info' | 'warning', message: string) end\nConfig:Print('random', 'message')",
+    ] {
+        let error = crate::compile_source(source).expect_err(source);
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "LT2002"),
+            "{source}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn updates_reassigned_function_signatures_and_respects_local_shadowing() {
+    let reassigned =
+        "local emit = function(value: number) end\nemit = function(value: string) end\nemit(1)";
+    assert!(crate::compile_source(reassigned).is_err());
+    let shadowed =
+        "local emit = function(value: number) end\ndo\n local emit = 1\n emit()\nend\nemit(1)";
+    let error = crate::compile_source(shadowed).unwrap_err();
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "LT2008"),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "LT2002")
+    );
+}
+
+#[test]
+fn resolves_missing_fields_in_calls_and_allows_external_dynamic_calls() {
+    for source in [
+        "local cfg = {}\nlocal value = cfg.print",
+        "local cfg = {}\ncfg.print('x')",
+        "local cfg = {}\ncfg['print']('x')",
+    ] {
+        let error = crate::compile_source(source).expect_err(source);
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "LT2005"),
+            "{source}: {error:?}"
+        );
+        assert_eq!(
+            error
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "LT2005")
+                .count(),
+            1,
+            "{source}: {error:?}"
+        );
+    }
+    assert!(crate::compile_source("ExternalFunction('anything')").is_ok());
+    assert!(crate::compile_source("local value: any = {}\nvalue('anything')").is_ok());
+}
+
+#[test]
+fn checks_lua_parenthesis_free_calls_and_highlights_the_argument() {
+    let source = "local take = function(value: number) end\ntake 'wrong'";
+    let error = crate::compile_source(source).unwrap_err();
+    let diagnostic = error
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "LT2002")
+        .unwrap();
+    assert_eq!(&source[diagnostic.source_range.clone()], "'wrong'");
+    let table_call =
+        "local take = function(value: { count: number }) end\ntake { count = 'wrong' }";
+    let error = crate::compile_source(table_call).unwrap_err();
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "LT2002"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn preserves_generic_vararg_and_tuple_signatures_on_function_values() {
+    let source = "local unpack = function<T>(first: T, ...: number): (T, number) return first, ... end\nlocal copy = unpack\ncopy('ok', 'wrong')";
+    let error = crate::compile_source(source).unwrap_err();
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "LT2002"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn module_exports_union_only_top_level_return_types() {
+    let imports = HashMap::new();
+    assert_eq!(
+        super::infer_module_export_type("if true then return 1 else return 'text' end", &imports,),
+        "'text' | integer"
+    );
+    assert_eq!(
+        super::infer_module_export_type(
+            "local function hidden(): string return 'text' end",
+            &imports,
+        ),
+        "nil"
+    );
+}
+
+#[test]
+fn rejects_calls_to_known_non_callable_values() {
+    for source in [
+        "local value = 1\nvalue()",
+        "local value = 'text'\nvalue()",
+        "local value = {}\nvalue()",
+    ] {
+        let error = crate::compile_source(source).expect_err(source);
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "LT2008"),
+            "{source}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_missing_function_fields_through_record_aliases() {
+    let source = "type Config = { Print: (message: string) -> nil }\ntype Wrapper = { config: Config }\nlocal cfg: Config = { Print = function(message: string) end }\nlocal wrapper: Wrapper = { config = cfg }\ncfg.Missing('x')\ncfg['Missing']('x')\nwrapper.config.Missing('x')";
+    let error = crate::compile_source(source).unwrap_err();
+    assert_eq!(
+        error
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "LT2005")
+            .count(),
+        3,
+        "{error:?}"
+    );
+}
+
+#[test]
+fn keeps_table_field_callback_signatures_after_block_scope_ends() {
+    let source = "local config = {}\ndo config.Print = function(value: number) end end\nconfig.Print('wrong')";
+    let error = crate::compile_source(source).unwrap_err();
+    assert_eq!(error.diagnostics[0].code, "LT2002", "{error:?}");
+}
+
+#[test]
 fn checks_literal_returns_against_known_function_signatures() {
     let source = "local function take(): number return 'wrong' end";
     let prepared = prepare(source);
