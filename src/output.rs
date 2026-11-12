@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 pub(crate) fn warning(message: &str) {
-    eprintln!("{} {message}", paint("warning:", "33"));
+    eprintln!("\n{} {message}", paint("warning:", "33"));
 }
 
 pub(crate) fn paint(text: &str, color: &str) -> String {

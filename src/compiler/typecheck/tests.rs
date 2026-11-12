@@ -1281,6 +1281,56 @@ fn checks_missing_required_arguments_as_nil() {
 }
 
 #[test]
+fn reports_all_missing_literal_and_string_arguments() {
+    let source = "function sss(status: 'info', message: string) end\nsss()";
+    let error = crate::compile_source(source).unwrap_err();
+    let arguments = error
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "LT2002")
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 2, "{error:?}");
+    assert!(arguments[0].message.contains("Argument 1 ('status')"));
+    assert!(arguments[1].message.contains("Argument 2 ('message')"));
+}
+
+#[test]
+fn rejects_non_literal_values_for_literal_parameters() {
+    for source in [
+        "local function take(value: 'info') end\ntake(nil)",
+        "local function take(value: 'info' | 'warning') end\ntake(1)",
+        "local text: string = 'info'\nlocal function take(value: 'info') end\ntake(text)",
+    ] {
+        assert!(crate::compile_source(source).is_err(), "{source}");
+    }
+    for source in [
+        "local function take(value: 'info') end\ntake('info')",
+        "type Status = 'info' | 'warning'\nlocal function take(value: Status?) end\ntake('info')",
+    ] {
+        assert!(crate::compile_source(source).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn checks_record_function_call_return_types() {
+    for source in [
+        "local function use(cfg: { print: (status: string) -> boolean })\nlocal retval: number = cfg.print('hello')\nend",
+        "local function use(cfg: { print: (status: string) -> boolean })\nlocal retval: number = cfg['print']('hello')\nend",
+        "local function use(cfg: { nested: { print: (status: string) -> boolean } })\nlocal retval: number = cfg.nested.print('hello')\nend",
+    ] {
+        let error = crate::compile_source(source).expect_err(source);
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "LT2001"),
+            "{error:?}"
+        );
+    }
+    assert!(crate::compile_source("local function use(cfg: { print: (status: string) -> boolean })\nlocal retval: boolean = cfg.print('hello')\nend").is_ok());
+}
+
+#[test]
 fn accepts_omitted_optional_parameters() {
     let source = "local function describe(id: number, label: string?) end\ndescribe(1)";
     assert!(crate::compile_source(source).is_ok());

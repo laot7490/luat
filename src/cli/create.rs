@@ -73,7 +73,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     let root = std::path::PathBuf::from(root);
     create_project(&root).map_err(|error| (2, error))?;
     println!(
-        "Created LuaT project in {}\nRun `luat check` to check your scripts or `luat build` to build the resource.",
+        "\nCreated LuaT project in {}\nRun `luat check` to check your scripts or `luat build` to build the resource.",
         root.display()
     );
     Ok(())

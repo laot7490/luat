@@ -199,6 +199,9 @@ pub(super) fn is_assignable(
     if actual == "any" || expected == "any" || expected == "unknown" || expected == actual {
         return Some(true);
     }
+    if actual == "nil" && expected.starts_with(['\'', '"']) {
+        return Some(false);
+    }
     if actual.starts_with(['\'', '"']) {
         if expected == "string" {
             return Some(true);
@@ -207,8 +210,24 @@ pub(super) fn is_assignable(
             return Some(lua_string_value(actual) == lua_string_value(expected));
         }
     }
+    if expected.starts_with(['\'', '"'])
+        && matches!(actual, "nil" | "string" | "number" | "integer" | "boolean")
+    {
+        return Some(false);
+    }
     let union = split_union(expected);
     if union.len() > 1 {
+        if union.iter().all(|member| member.starts_with(['\'', '"'])) {
+            return if actual.starts_with(['\'', '"']) {
+                Some(union.iter().any(|member| {
+                    is_assignable(actual, member, aliases, &mut seen.clone()) == Some(true)
+                }))
+            } else if matches!(actual, "nil" | "string" | "number" | "integer" | "boolean") {
+                Some(false)
+            } else {
+                None
+            };
+        }
         let mut uncertain = false;
         for member in union {
             match is_assignable(actual, member, aliases, &mut seen.clone()) {

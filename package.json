@@ -1,10 +1,11 @@
 {
-  "name": "luat-workspace",
-  "private": true,
-  "scripts": {
-    "prepare:major": "node scripts/prepare-version.mjs major",
-    "prepare:minor": "node scripts/prepare-version.mjs minor",
-    "prepare:patch": "node scripts/prepare-version.mjs patch",
-    "sync:versions": "node scripts/sync-versions.mjs"
-  }
+	"name": "luat-workspace",
+	"private": true,
+	"scripts": {
+		"local": "cargo install --path . --force",
+		"prepare:major": "node scripts/prepare-version.mjs major",
+		"prepare:minor": "node scripts/prepare-version.mjs minor",
+		"prepare:patch": "node scripts/prepare-version.mjs patch",
+		"sync:versions": "node scripts/sync-versions.mjs"
+	}
 }

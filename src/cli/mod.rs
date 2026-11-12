@@ -13,15 +13,15 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 
 pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("luat {}", env!("CARGO_PKG_VERSION"));
+        println!("\nluat {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{}", usage());
+        println!("\n{}", usage());
         return Ok(());
     }
     let Some(command) = args.first().map(String::as_str) else {
-        println!("{}", usage());
+        println!("\n{}", usage());
         return Ok(());
     };
     if command == "create" {
@@ -99,7 +99,7 @@ fn run_project(command: &str, project: Project, pretty: bool) -> Result<(), (u8,
     })?;
     if let Some(output_dir) = result.output_dir {
         println!(
-            "{}",
+            "\n{}",
             paint(
                 &format!("Build complete in {}ms", started.elapsed().as_millis()),
                 Color::Success,
@@ -114,7 +114,7 @@ fn run_project(command: &str, project: Project, pretty: bool) -> Result<(), (u8,
         println!("  Output: {}", output_dir.display());
     } else {
         println!(
-            "{}",
+            "\n{}",
             paint(
                 &format!(
                     "Checked {} source {} and {} {}",

@@ -15,7 +15,7 @@ function launch() {
   const key = `${process.platform}-${process.arch}`;
   const binaryPackage = packages[key];
   if (!binaryPackage) {
-    console.error(`error: LuaT has no binary for ${key}.`);
+    console.error(`\nerror: LuaT has no binary for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -24,7 +24,7 @@ function launch() {
   try {
     binary = require.resolve(binaryPackage);
   } catch {
-    console.error(`error: LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
+    console.error(`\nerror: LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -40,7 +40,7 @@ function launch() {
   child.once('error', (error) => {
     spawnFailed = true;
     process.exitCode = 2;
-    console.error(`error: Could not start the LuaT compiler: ${error.message}`);
+    console.error(`\nerror: Could not start the LuaT compiler: ${error.message}`);
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => child.kill(signal));

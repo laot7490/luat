@@ -659,12 +659,12 @@ impl TypeChecker<'_> {
             && matching_delimiter(expression, open, '(', ')').is_some()
         {
             let name = expression[..open].trim();
-            if let Some(signature) = self.functions.get(name) {
+            if let Some(signature) = self.resolve_function_signature(name) {
                 let args = split_top_level(
                     &expression[open + 1..matching_delimiter(expression, open, '(', ')').unwrap()],
                     ',',
                 );
-                return infer_generic_return(signature, &args, self);
+                return infer_generic_return(&signature, &args, self);
             }
             return "any".to_owned();
         }
@@ -677,6 +677,19 @@ impl TypeChecker<'_> {
             return "string".to_owned();
         }
         "any".to_owned()
+    }
+
+    fn resolve_function_signature(&self, name: &str) -> Option<FunctionSignature> {
+        let field_access = split_known_field_access(name);
+        self.functions
+            .get(name)
+            .cloned()
+            .or_else(|| {
+                field_access.and_then(|(receiver, field, _)| {
+                    self.functions.get(&format!("{receiver}.{field}")).cloned()
+                })
+            })
+            .or_else(|| parse_function_type(&self.infer_expression_type(name)))
     }
 
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
@@ -1543,16 +1556,7 @@ impl Visitor for TypeChecker<'_> {
             })
             .unwrap_or_default();
         let field_access = split_known_field_access(name);
-        let signature = self
-            .functions
-            .get(name)
-            .cloned()
-            .or_else(|| {
-                field_access.and_then(|(receiver, field, _)| {
-                    self.functions.get(&format!("{receiver}.{field}")).cloned()
-                })
-            })
-            .or_else(|| parse_function_type(&self.infer_expression_type(name)));
+        let signature = self.resolve_function_signature(name);
         if self
             .scopes
             .iter()

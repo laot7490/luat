@@ -89,7 +89,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
             })?;
     }
     println!(
-        "Watching {} for source and configuration changes",
+        "\nWatching {} for source and configuration changes",
         folder.display()
     );
     build(&folder, pretty);
@@ -134,7 +134,7 @@ fn build(folder: &Path, pretty: bool) {
         .map_err(|error| (2, super::render::render_build_error(&error, pretty)))
         .and_then(|project| super::run_project("build", project, pretty));
     if let Err((_, message)) = result {
-        eprintln!("{message}");
+        eprintln!("\n{message}");
     }
 }
 

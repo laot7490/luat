@@ -263,6 +263,41 @@ fn checks_imported_table_function_and_reexport_signatures() {
 }
 
 #[test]
+fn checks_return_types_of_imported_function_fields() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/server")).unwrap();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/shared/config.luat"),
+        "type Status = 'info'\nreturn { print = function(status: Status, message: string): boolean return true end }",
+    )
+    .unwrap();
+    let source =
+        "const cfg = import('@/shared/config')\nlocal retval: number = cfg.print('info', 'hello')";
+    fs::write(root.join("src/server/main.luat"), source).unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nserver=['src/server/main.luat']\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("dist/server")).unwrap();
+    fs::write(root.join("dist/server/main.lua"), "preserve me").unwrap();
+
+    let project = Project::load(&root).unwrap();
+    let check_error = project.check().unwrap_err();
+    let build_error = project.build().unwrap_err();
+    let (_, check_diagnostic) = main_diagnostic(&check_error);
+    let (_, build_diagnostic) = main_diagnostic(&build_error);
+    assert_eq!(check_diagnostic.code, "LT2001");
+    assert_eq!(check_diagnostic, build_diagnostic);
+    assert_eq!(
+        fs::read_to_string(root.join("dist/server/main.lua")).unwrap(),
+        "preserve me"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn resolves_exported_aliases_in_their_defining_module_and_keeps_import_runtime() {
     let root = temp_project();
     fs::create_dir_all(root.join("src/client")).unwrap();
