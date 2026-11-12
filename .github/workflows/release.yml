@@ -120,15 +120,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/release-assets
-          cp .release-artifacts/luat-win32-x64/luat.exe target/release-assets/luat-win32-x64.exe
-          cp .release-artifacts/luat-linux-x64/luat target/release-assets/luat-linux-x64
-          cp .release-artifacts/luat-linux-arm64/luat target/release-assets/luat-linux-arm64
-          cp .release-artifacts/luat-darwin-x64/luat target/release-assets/luat-darwin-x64
-          cp .release-artifacts/luat-darwin-arm64/luat target/release-assets/luat-darwin-arm64
-          for asset in target/release-assets/*; do
-            test -s "$asset"
+          for package in luat-win32-x64 luat-linux-x64 luat-linux-arm64 luat-darwin-x64 luat-darwin-arm64; do
+            executable=luat
+            if [ "$package" = luat-win32-x64 ]; then
+              executable=luat.exe
+            else
+              chmod +x ".release-artifacts/$package/$executable"
+            fi
+            asset="target/release-assets/$package.tar.gz"
+            test -s ".release-artifacts/$package/$executable"
+            tar --mode=755 -czf "$asset" -C ".release-artifacts/$package" "$executable"
+            tar -tzf "$asset" >/dev/null
           done
-      - name: Attach binaries to GitHub Release
+      - name: Attach archives to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" target/release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
