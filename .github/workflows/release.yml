@@ -57,12 +57,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@latest
       - uses: actions/download-artifact@v4
         with:
           path: .release-artifacts
@@ -95,10 +97,8 @@ jobs:
           }
           NODE
       - name: Publish platform packages and CLI
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for package in luat-win32-x64 luat-linux-x64 luat-linux-arm64 luat-darwin-x64 luat-darwin-arm64; do
-            npm publish "./packages/$package" --access public
+            npm publish "./packages/$package" --access public --provenance
           done
-          npm publish ./packages/luat --access public
+          npm publish ./packages/luat --access public --provenance
