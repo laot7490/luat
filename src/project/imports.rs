@@ -237,41 +237,94 @@ impl Project {
     pub(super) fn analyze_imports(&self) -> Result<ImportPlan, BuildError> {
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
-        let mut errors = Vec::new();
+        let mut paths = HashMap::new();
         for file in &self.sources {
-            let source = fs::read_to_string(&file.input).map_err(|source| BuildError::Io {
-                path: file.input.clone(),
-                source,
-            })?;
-            plan.texts.insert(file.input.clone(), source.clone());
             if file.output.is_none() {
+                let source = fs::read_to_string(&file.input).map_err(|source| BuildError::Io {
+                    path: file.input.clone(),
+                    source,
+                })?;
+                plan.texts.insert(file.input.clone(), source);
                 continue;
             }
-            match collect_imports(&source) {
-                Ok(calls) => {
-                    let id = file
-                        .output
-                        .as_ref()
-                        .unwrap()
-                        .with_extension("")
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    modules.insert(
-                        id,
-                        Module {
-                            path: file.input.clone(),
-                            source,
-                            calls,
-                            edges: Vec::new(),
-                        },
-                    );
-                }
-                Err(error) => errors.push((file.input.clone(), error)),
+            let id = file
+                .output
+                .as_ref()
+                .unwrap()
+                .with_extension("")
+                .to_string_lossy()
+                .replace('\\', "/");
+            paths.insert(id, file.input.clone());
+        }
+        for (id, path) in &paths {
+            modules.insert(
+                id.clone(),
+                Module {
+                    path: path.clone(),
+                    source: String::new(),
+                    calls: Vec::new(),
+                    edges: Vec::new(),
+                },
+            );
+        }
+        let f = &self.config.fivem;
+        let mut originals: [Vec<String>; 3] = Default::default();
+        for (side, entries) in [&f.shared, &f.client, &f.server].into_iter().enumerate() {
+            originals[side] =
+                manifest::expanded_paths(entries, &self.root, false).map_err(|message| {
+                    BuildError::Configuration {
+                        path: self.config_path.clone(),
+                        message,
+                    }
+                })?;
+        }
+        let mut pending = originals
+            .iter()
+            .flatten()
+            .filter_map(|path| {
+                path.strip_prefix("src/")
+                    .and_then(|path| path.strip_suffix(".luat"))
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        let mut visited = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
             }
+            let Some(path) = paths.get(&id).cloned() else {
+                continue;
+            };
+            let source = fs::read_to_string(&path).map_err(|source| BuildError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let calls = collect_imports(&source).map_err(|error| BuildError::Compile {
+                path: path.clone(),
+                error,
+            })?;
+            plan.texts.insert(path.clone(), source.clone());
+            let mut module = Module {
+                path: path.clone(),
+                source,
+                calls,
+                edges: Vec::new(),
+            };
+            let mut resolved = HashMap::new();
+            let mut dependencies = Vec::new();
+            for call in &module.calls {
+                let target = resolve(&module, call, &modules, &self.root)?;
+                resolved.insert(call.specifier.clone(), target.clone());
+                plan.wrapped.insert(module.path.clone());
+                plan.wrapped.insert(modules[&target].path.clone());
+                dependencies.push((call.clone(), target));
+            }
+            plan.resolved.insert(module.path.clone(), resolved);
+            pending.extend(dependencies.iter().map(|(_, target)| target.clone()));
+            module.edges = dependencies;
+            modules.insert(id, module);
         }
-        if !errors.is_empty() {
-            return Err(compile_errors(errors));
-        }
+        modules.retain(|id, _| visited.contains(id));
         for module in modules.values() {
             if module
                 .path
@@ -297,39 +350,13 @@ impl Project {
         if modules.values().all(|module| module.calls.is_empty()) {
             return Ok(plan);
         }
-        let mut edges = BTreeMap::new();
-        for (id, module) in &modules {
-            let mut resolved = HashMap::new();
-            let mut dependencies = Vec::new();
-            for call in &module.calls {
-                let target = resolve(module, call, &modules, &self.root)?;
-                resolved.insert(call.specifier.clone(), target.clone());
-                plan.wrapped.insert(module.path.clone());
-                plan.wrapped.insert(modules[&target].path.clone());
-                dependencies.push((call.clone(), target));
-            }
-            plan.resolved.insert(module.path.clone(), resolved);
-            edges.insert(id.clone(), dependencies);
-        }
-        for (id, edges) in edges {
-            modules.get_mut(&id).unwrap().edges = edges;
-        }
         let mut complete = HashSet::new();
         for id in modules.keys() {
             visit_cycle(id, &modules, &mut complete)?;
         }
 
-        let f = &self.config.fivem;
-        let mut originals: [Vec<String>; 3] = Default::default();
         let mut declared = HashMap::<String, u8>::new();
-        for (side, paths) in [&f.shared, &f.client, &f.server].into_iter().enumerate() {
-            originals[side] =
-                manifest::expanded_paths(paths, &self.root, false).map_err(|message| {
-                    BuildError::Configuration {
-                        path: self.config_path.clone(),
-                        message,
-                    }
-                })?;
+        for side in 0..3 {
             for path in &originals[side] {
                 if let Some(id) = path
                     .strip_prefix("src/")

@@ -240,7 +240,6 @@ impl Project {
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
             {
-                declaration_paths.insert(path);
                 continue;
             }
             let relative = path.strip_prefix(&root).unwrap_or(&path);
@@ -371,7 +370,9 @@ impl Project {
         let mut errors = Vec::new();
         let declarations = self.read_declarations()?;
         for file in &self.sources {
-            let source = &plan.texts[&file.input];
+            let Some(source) = plan.texts.get(&file.input) else {
+                continue;
+            };
             let checked = if file.output.is_none() {
                 declarations::validate_declaration(source)
                     .and_then(|()| check_source_with_declarations(source, &declarations))
@@ -385,7 +386,7 @@ impl Project {
         if !errors.is_empty() {
             return Err(compile_errors(errors));
         }
-        Ok(self.result(None))
+        Ok(self.result(None, &plan))
     }
 
     pub fn build(&self) -> Result<BuildResult, BuildError> {
@@ -405,7 +406,7 @@ impl Project {
             self.manifest.clone()
         };
         self.publish(&outputs, &manifest)?;
-        Ok(self.result(Some(self.output_dir.clone())))
+        Ok(self.result(Some(self.output_dir.clone()), &plan))
     }
 
     fn compile_all(
@@ -416,6 +417,9 @@ impl Project {
         let mut errors = Vec::new();
         let declarations = self.read_declarations()?;
         for file in &self.sources {
+            if !plan.texts.contains_key(&file.input) {
+                continue;
+            }
             match self.compile(file, &declarations, plan) {
                 Ok(contents) => {
                     if let Some(relative) = &file.output {
@@ -496,17 +500,17 @@ impl Project {
         }
     }
 
-    fn result(&self, output_dir: Option<PathBuf>) -> BuildResult {
+    fn result(&self, output_dir: Option<PathBuf>, plan: &imports::ImportPlan) -> BuildResult {
         BuildResult {
             compiled_files: self
                 .sources
                 .iter()
-                .filter(|file| file.output.is_some())
+                .filter(|file| file.output.is_some() && plan.texts.contains_key(&file.input))
                 .count(),
             declaration_files: self
                 .sources
                 .iter()
-                .filter(|file| file.output.is_none())
+                .filter(|file| file.output.is_none() && plan.texts.contains_key(&file.input))
                 .count(),
             output_dir,
         }

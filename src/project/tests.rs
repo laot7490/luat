@@ -124,6 +124,63 @@ fn check_accepts_runtime_sources() {
 }
 
 #[test]
+fn ignores_unreferenced_sources_and_unconfigured_declarations() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/unused")).unwrap();
+    fs::write(root.join("src/client/main.luat"), "print('ready')").unwrap();
+    fs::write(
+        root.join("src/unused/broken.luat"),
+        "local x: number = 'bad'",
+    )
+    .unwrap();
+    fs::write(root.join("src/unused/types.d.luat"), "not valid lua !!!").unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+    )
+    .unwrap();
+    let project = Project::load(&root).unwrap();
+    let checked = project.check().unwrap();
+    assert_eq!(checked.compiled_files, 1);
+    assert_eq!(checked.declaration_files, 0);
+    let built = project.build().unwrap();
+    assert_eq!(built.compiled_files, 1);
+    assert!(!root.join("dist/unused/broken.lua").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn includes_transitive_imports_from_manifest_entries() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local value = import('@/shared/one')\nprint(value)",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared/one.luat"), "return import('./two')").unwrap();
+    fs::write(root.join("src/shared/two.luat"), "return 42").unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+    )
+    .unwrap();
+    let project = Project::load(&root).unwrap();
+    assert_eq!(project.check().unwrap().compiled_files, 3);
+    project.build().unwrap();
+    for path in [
+        "dist/client/main.lua",
+        "dist/shared/one.lua",
+        "dist/shared/two.lua",
+    ] {
+        assert!(root.join(path).exists(), "missing {path}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn manifest_remaps_sources_and_serializes_extra_values() {
     let config = toml::from_str::<ProjectConfig>("[project]\nname='test'\n[fivem]\nclient=['src/client/*.luat']\ndependencies=['some.luat']\n[[fivem.entries]]\nkey='custom_info'\nvalue='one'\nextra={enabled=true,count=42}\n").unwrap();
     let root = temp_project();

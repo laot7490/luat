@@ -6,8 +6,9 @@ pub(crate) fn create_project(root: &Path) -> Result<(), String> {
         "src/client/main.luat",
         "src/shared/config.luat",
         "src/server/main.luat",
+        "types/index.d.luat",
     ];
-    let directories = ["src", "src/client", "src/shared", "src/server"];
+    let directories = ["src", "src/client", "src/shared", "src/server", "types"];
     for path in files.iter().chain(directories.iter()) {
         let path = root.join(path);
         match fs::symlink_metadata(&path) {
@@ -42,7 +43,7 @@ pub(crate) fn create_project(root: &Path) -> Result<(), String> {
         .filter(|name| !name.is_empty())
         .unwrap_or("my-resource");
     let config = format!(
-        "[project]\nname = {}\nversion = \"1.0.0\"\n\n[compiler]\nout_dir = \"dist\"\n\n[fivem]\nfx_version = \"cerulean\"\ngame = \"gta5\"\nshared = [\"src/shared/config.luat\"]\nclient = [\"src/client/main.luat\"]\nserver = [\"src/server/main.luat\"]\n",
+        "[project]\nname = {}\nversion = \"1.0.0\"\n\n[compiler]\nout_dir = \"dist\"\ndeclarations = [\"types/index.d.luat\"]\n\n[fivem]\nfx_version = \"cerulean\"\ngame = \"gta5\"\nshared = [\"src/shared/config.luat\"]\nclient = [\"src/client/main.luat\"]\nserver = [\"src/server/main.luat\"]\n",
         toml::Value::String(name.to_owned())
     );
     for (relative, content) in [
@@ -50,6 +51,7 @@ pub(crate) fn create_project(root: &Path) -> Result<(), String> {
         ("src/client/main.luat", b"".as_slice()),
         ("src/shared/config.luat", b"".as_slice()),
         ("src/server/main.luat", b"".as_slice()),
+        ("types/index.d.luat", b"".as_slice()),
     ] {
         let path = root.join(relative);
         let mut file = fs::OpenOptions::new()
