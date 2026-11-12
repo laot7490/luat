@@ -1,0 +1,23 @@
+[package]
+name = "luat"
+version = "0.1.1"
+edition = "2024"
+description = "A typed Lua compiler targeting CfxLua."
+license = "MIT"
+
+[lib]
+name = "luat"
+path = "src/lib.rs"
+
+[[bin]]
+name = "luat"
+path = "src/main.rs"
+
+[dependencies]
+full_moon = { version = "3.0.0", features = ["cfxlua", "luau"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.2"
+glob = "0.3"
+stylua_lib = { package = "stylua", version = "2.6", default-features = false, features = ["cfxlua"] }
+unicode-width = "0.2"
+notify = "8.2"

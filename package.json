@@ -1,0 +1,7 @@
+{
+  "name": "luat-workspace",
+  "private": true,
+  "scripts": {
+    "sync:versions": "node scripts/sync-versions.mjs"
+  }
+}

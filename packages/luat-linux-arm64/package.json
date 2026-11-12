@@ -1,0 +1,19 @@
+{
+  "name": "luat-linux-arm64",
+  "version": "0.1.1",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "bin/luat",
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laot7490/luat.git"
+  }
+}

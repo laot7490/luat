@@ -1,0 +1,52 @@
+# Project metadata
+[project]
+name = 'my-script'
+version = '1.0.0'
+author = 'Your Name'
+description = 'A typed FiveM resource'
+
+# Compiler settings
+[compiler]
+out_dir = 'dist'
+declarations = ['types/fivem.d.luat']
+
+# FiveM resource manifest settings
+[fivem]
+fx_version = 'cerulean'
+game = 'gta5'
+games = ['gta5', 'rdr3']
+shared = ['@ox_lib/init.lua', 'src/shared/config.luat']
+client = ['src/client/main.luat']
+server = ['@oxmysql/lib/MySQL.lua', 'src/server/main.luat']
+files = ['web/**']
+dependencies = ['ox_lib']
+exports = ['GetPlayerData']
+server_exports = ['GetServerData']
+provide = ['legacy_resource']
+escrow_ignore = ['src/shared/config.luat']
+ui_page = 'web/index.html'
+loadscreen = 'web/loadscreen.html'
+loadscreen_cursor = true
+loadscreen_manual_shutdown = true
+server_only = false
+this_is_a_map = false
+node_version = 22
+use_experimental_fxv2_oal = true
+clr_disable_task_scheduler = false
+before_level_meta = 'data/before.meta'
+after_level_meta = 'data/after.meta'
+replace_level_meta = 'data/replacement.meta'
+# Deprecated; use fx_version instead.
+resource_manifest_version = '44febabe-d386-4d18-afbe-5e627f4af937'
+lua54 = true
+
+# Add one table per data_file entry.
+[[fivem.data_file]]
+type = 'DLC_ITYP_REQUEST'
+path = 'stream/props.ytyp'
+
+# Add one table per custom manifest entry. `extra` is optional.
+[[fivem.entries]]
+key = 'custom_info'
+value = 'example'
+extra = { enabled = true, count = 42 }

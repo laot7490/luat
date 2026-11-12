@@ -1,0 +1,406 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use super::*;
+use crate::compiler::{
+    collect_imports,
+    imports::{ImportCall, lua_string},
+};
+
+#[derive(Default)]
+pub(super) struct ImportPlan {
+    pub texts: HashMap<PathBuf, String>,
+    pub resolved: HashMap<PathBuf, HashMap<String, String>>,
+    pub wrapped: HashSet<PathBuf>,
+    pub scripts: Option<[Vec<String>; 3]>,
+    pub entries: Vec<(PathBuf, String)>,
+}
+
+struct Module {
+    path: PathBuf,
+    source: String,
+    calls: Vec<ImportCall>,
+    edges: Vec<(ImportCall, String)>,
+}
+
+fn diagnostic(
+    module: &Module,
+    call: Option<&ImportCall>,
+    code: &'static str,
+    message: String,
+) -> BuildError {
+    let span = call.map(|call| call.source_range.clone()).unwrap_or(0..0);
+    BuildError::Compile {
+        path: module.path.clone(),
+        error: CompileError {
+            diagnostics: vec![Diagnostic::range(
+                &module.source,
+                span.start,
+                span.end,
+                code,
+                message,
+            )],
+        },
+    }
+}
+
+fn resolve(
+    module: &Module,
+    call: &ImportCall,
+    modules: &BTreeMap<String, Module>,
+    root: &Path,
+) -> Result<String, BuildError> {
+    let specifier = &call.specifier;
+    let invalid = || {
+        diagnostic(
+            module,
+            Some(call),
+            "LT4002",
+            format!(
+                "Invalid import path '{specifier}'; use ./, ../ or @/ within src/ and target a .luat module"
+            ),
+        )
+    };
+    if specifier.contains(['\\', '\0', '\r', '\n', ':']) || specifier.ends_with('/') {
+        return Err(invalid());
+    }
+    let (base, rest) = if let Some(rest) = specifier.strip_prefix("@/") {
+        (Vec::new(), rest)
+    } else if specifier.starts_with("./") || specifier.starts_with("../") {
+        let relative = module.path.strip_prefix(root.join("src")).unwrap();
+        (
+            relative
+                .parent()
+                .unwrap()
+                .iter()
+                .map(|part| part.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            specifier.as_str(),
+        )
+    } else {
+        return Err(invalid());
+    };
+    let mut parts = base;
+    for part in rest.split('/') {
+        match part {
+            "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(invalid());
+                }
+            }
+            "" => return Err(invalid()),
+            _ => parts.push(part.to_owned()),
+        }
+    }
+    let path = parts.join("/");
+    if path.is_empty() || path.ends_with(".d.luat") || path.split('/').next() == Some("_luat") {
+        return Err(invalid());
+    }
+    let explicit = path.ends_with(".luat");
+    if !explicit && Path::new(&path).extension().is_some() {
+        return Err(invalid());
+    }
+    let candidates = if explicit {
+        vec![path.strip_suffix(".luat").unwrap().to_owned()]
+    } else {
+        vec![path.clone(), format!("{path}/init")]
+    };
+    let found = candidates
+        .into_iter()
+        .filter(|id| modules.contains_key(id))
+        .collect::<Vec<_>>();
+    match found.as_slice() {
+        [id] => Ok(id.clone()),
+        [] => Err(diagnostic(
+            module,
+            Some(call),
+            "LT4003",
+            format!("Import '{specifier}' was not found with exact filename case under src/"),
+        )),
+        _ => Err(diagnostic(
+            module,
+            Some(call),
+            "LT4004",
+            format!(
+                "Import '{specifier}' is ambiguous: both {path}.luat and {path}/init.luat exist"
+            ),
+        )),
+    }
+}
+
+fn visit_cycle<'a>(
+    id: &'a str,
+    modules: &'a BTreeMap<String, Module>,
+    complete: &mut HashSet<String>,
+) -> Result<(), BuildError> {
+    if complete.contains(id) {
+        return Ok(());
+    }
+    let mut stack = vec![(id, 0)];
+    let mut active = HashMap::from([(id, 0)]);
+    while let Some(&(current, next)) = stack.last() {
+        let module = &modules[current];
+        if next == module.edges.len() {
+            complete.insert(current.to_owned());
+            active.remove(current);
+            stack.pop();
+            continue;
+        }
+        stack.last_mut().unwrap().1 += 1;
+        let (call, target) = &module.edges[next];
+        if let Some(&start) = active.get(target.as_str()) {
+            let mut cycle = stack[start..]
+                .iter()
+                .map(|(id, _)| (*id).to_owned())
+                .collect::<Vec<_>>();
+            cycle.push(target.clone());
+            return Err(diagnostic(
+                module,
+                Some(call),
+                "LT4005",
+                format!("Import cycle: {}", cycle.join(" -> ")),
+            ));
+        }
+        if !complete.contains(target) {
+            active.insert(target.as_str(), stack.len());
+            stack.push((target.as_str(), 0));
+        }
+    }
+    Ok(())
+}
+
+fn side_name(side: usize) -> &'static str {
+    ["shared", "client", "server"][side]
+}
+
+fn collect_side<'a>(
+    id: &'a str,
+    side: usize,
+    modules: &'a BTreeMap<String, Module>,
+    declared: &HashMap<String, u8>,
+    collected: &mut BTreeSet<String>,
+) -> Result<(), BuildError> {
+    if !collected.insert(id.to_owned()) {
+        return Ok(());
+    }
+    let mut stack = vec![(id, 0)];
+    while let Some(&(current, next)) = stack.last() {
+        let module = &modules[current];
+        if next == module.edges.len() {
+            stack.pop();
+            continue;
+        }
+        stack.last_mut().unwrap().1 += 1;
+        let (call, target) = &module.edges[next];
+        let directory = target.split('/').next().unwrap();
+        let private_violation = match directory {
+            "server" => side != 2,
+            "client" => side != 1,
+            _ => false,
+        };
+        let declared_violation = declared.get(target).is_some_and(|mask| {
+            let allowed = if side == 0 { 1 } else { 1 | (1 << side) };
+            mask & allowed == 0
+        });
+        if private_violation || declared_violation {
+            let mut path = stack
+                .iter()
+                .map(|(id, _)| (*id).to_owned())
+                .collect::<Vec<_>>();
+            path.push(target.clone());
+            return Err(diagnostic(
+                module,
+                Some(call),
+                "LT4006",
+                format!(
+                    "{} entry cannot import '{target}': {}",
+                    side_name(side),
+                    path.join(" -> ")
+                ),
+            ));
+        }
+        if collected.insert(target.clone()) {
+            stack.push((target.as_str(), 0));
+        }
+    }
+    Ok(())
+}
+
+fn output_path_for(id: &str, out_dir: &Path) -> String {
+    out_dir
+        .join(format!("{id}.lua"))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+impl Project {
+    pub(super) fn analyze_imports(&self) -> Result<ImportPlan, BuildError> {
+        let mut modules = BTreeMap::new();
+        let mut plan = ImportPlan::default();
+        let mut errors = Vec::new();
+        for file in &self.sources {
+            let source = fs::read_to_string(&file.input).map_err(|source| BuildError::Io {
+                path: file.input.clone(),
+                source,
+            })?;
+            plan.texts.insert(file.input.clone(), source.clone());
+            if file.output.is_none() {
+                continue;
+            }
+            match collect_imports(&source) {
+                Ok(calls) => {
+                    let id = file
+                        .output
+                        .as_ref()
+                        .unwrap()
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    modules.insert(
+                        id,
+                        Module {
+                            path: file.input.clone(),
+                            source,
+                            calls,
+                            edges: Vec::new(),
+                        },
+                    );
+                }
+                Err(error) => errors.push((file.input.clone(), error)),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(compile_errors(errors));
+        }
+        for module in modules.values() {
+            if module
+                .path
+                .strip_prefix(self.root.join("src"))
+                .unwrap()
+                .components()
+                .next()
+                .is_some_and(|component| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("_luat")
+                })
+            {
+                return Err(diagnostic(
+                    module,
+                    None,
+                    "LT4002",
+                    "src/_luat/ is reserved for generated runtime files".to_owned(),
+                ));
+            }
+        }
+        if modules.values().all(|module| module.calls.is_empty()) {
+            return Ok(plan);
+        }
+        let mut edges = BTreeMap::new();
+        for (id, module) in &modules {
+            let mut resolved = HashMap::new();
+            let mut dependencies = Vec::new();
+            for call in &module.calls {
+                let target = resolve(module, call, &modules, &self.root)?;
+                resolved.insert(call.specifier.clone(), target.clone());
+                plan.wrapped.insert(module.path.clone());
+                plan.wrapped.insert(modules[&target].path.clone());
+                dependencies.push((call.clone(), target));
+            }
+            plan.resolved.insert(module.path.clone(), resolved);
+            edges.insert(id.clone(), dependencies);
+        }
+        for (id, edges) in edges {
+            modules.get_mut(&id).unwrap().edges = edges;
+        }
+        let mut complete = HashSet::new();
+        for id in modules.keys() {
+            visit_cycle(id, &modules, &mut complete)?;
+        }
+
+        let f = &self.config.fivem;
+        let mut originals: [Vec<String>; 3] = Default::default();
+        let mut declared = HashMap::<String, u8>::new();
+        for (side, paths) in [&f.shared, &f.client, &f.server].into_iter().enumerate() {
+            originals[side] =
+                manifest::expanded_paths(paths, &self.root, false).map_err(|message| {
+                    BuildError::Configuration {
+                        path: self.config_path.clone(),
+                        message,
+                    }
+                })?;
+            for path in &originals[side] {
+                if let Some(id) = path
+                    .strip_prefix("src/")
+                    .and_then(|path| path.strip_suffix(".luat"))
+                {
+                    *declared.entry(id.to_owned()).or_default() |= 1 << side;
+                }
+            }
+        }
+        let mut closures: [BTreeSet<String>; 3] = Default::default();
+        for side in 0..3 {
+            for path in &originals[side] {
+                let Some(id) = path
+                    .strip_prefix("src/")
+                    .and_then(|path| path.strip_suffix(".luat"))
+                else {
+                    continue;
+                };
+                let Some(module) = modules.get(id) else {
+                    continue;
+                };
+                let private = id.split('/').next().unwrap();
+                if private == "server" && side != 2 || private == "client" && side != 1 {
+                    return Err(diagnostic(
+                        module,
+                        None,
+                        "LT4006",
+                        format!("{} entry cannot execute '{id}'", side_name(side)),
+                    ));
+                }
+                collect_side(id, side, &modules, &declared, &mut closures[side])?;
+            }
+        }
+        let out_dir = &self.config.compiler.out_dir;
+        let mut scripts: [Vec<String>; 3] = Default::default();
+        scripts[0].push(output_path_for("_luat/runtime", out_dir));
+        for side in 0..3 {
+            for id in &closures[side] {
+                if plan.wrapped.contains(&modules[id].path)
+                    && (side == 0 || !closures[0].contains(id))
+                {
+                    scripts[side].push(output_path_for(id, out_dir));
+                }
+            }
+            for path in &originals[side] {
+                if let Some(id) = path
+                    .strip_prefix("src/")
+                    .and_then(|path| path.strip_suffix(".luat"))
+                {
+                    if modules
+                        .get(id)
+                        .is_some_and(|module| plan.wrapped.contains(&module.path))
+                    {
+                        let stub = format!("_luat/entries/{id}");
+                        scripts[side].push(output_path_for(&stub, out_dir));
+                        let entry = (
+                            PathBuf::from(format!("{stub}.lua")),
+                            format!("__luat.import({})\n", lua_string(id)),
+                        );
+                        if !plan.entries.iter().any(|(path, _)| *path == entry.0) {
+                            plan.entries.push(entry);
+                        }
+                    } else {
+                        scripts[side].push(output_path_for(id, out_dir));
+                    }
+                } else {
+                    scripts[side].push(path.clone());
+                }
+            }
+        }
+        plan.scripts = Some(scripts);
+        Ok(plan)
+    }
+}

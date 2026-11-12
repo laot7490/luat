@@ -1,0 +1,27 @@
+{
+  "name": "@luatlang/cli",
+  "version": "0.1.1",
+  "description": "Typed Lua compiler for FiveM",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "luat": "bin/luat.js"
+  },
+  "files": [
+    "bin/luat.js",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "luat-win32-x64": "0.1.1",
+    "luat-linux-x64": "0.1.1",
+    "luat-linux-arm64": "0.1.1",
+    "luat-darwin-x64": "0.1.1",
+    "luat-darwin-arm64": "0.1.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laot7490/luat.git"
+  }
+}
