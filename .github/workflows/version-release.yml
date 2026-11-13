@@ -57,7 +57,7 @@ jobs:
           else
             git cliff --unreleased --tag "$TAG" --config cliff.toml --output release-notes.md
           fi
-          gh release create "$TAG" --target "$TARGET_SHA" --title "$TAG" --notes-file release-notes.md
+          gh release create "$TAG" --target "$TARGET_SHA" --title "luat ${TAG#v}" --notes-file release-notes.md
           echo 'created=true' >> "$GITHUB_OUTPUT"
 
   build-and-publish:
