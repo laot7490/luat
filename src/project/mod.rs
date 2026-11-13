@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::compiler::{
-    check_project_source, check_source_with_declarations, compile_project_source,
+    check_project_source, check_source_with_declarations, compile_project_source_unformatted,
 };
 use crate::{CompileError, Diagnostic};
 
@@ -477,7 +477,7 @@ impl Project {
                 })?;
             return Ok(String::new());
         }
-        let compiled = compile_project_source(
+        let compiled = compile_project_source_unformatted(
             source,
             declarations,
             plan.resolved.get(&file.input),
@@ -487,7 +487,7 @@ impl Project {
             path: file.input.clone(),
             error,
         })?;
-        if plan.wrapped.contains(&file.input) {
+        let generated = if plan.wrapped.contains(&file.input) {
             let id = file
                 .output
                 .as_ref()
@@ -499,15 +499,14 @@ impl Project {
                 "__luat.register({}, function(...)\n{compiled}\nend)\n",
                 crate::compiler::imports::lua_string(&id)
             );
-            crate::compiler::format_output(source, &generated).map_err(|error| {
-                BuildError::Compile {
-                    path: file.input.clone(),
-                    error,
-                }
-            })
+            generated
         } else {
-            Ok(compiled)
-        }
+            compiled
+        };
+        crate::compiler::format_output(source, &generated).map_err(|error| BuildError::Compile {
+            path: file.input.clone(),
+            error,
+        })
     }
 
     fn result(&self, output_dir: Option<PathBuf>, plan: &imports::ImportPlan) -> BuildResult {

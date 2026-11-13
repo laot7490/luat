@@ -52,6 +52,16 @@ pub(crate) fn compile_project_source(
     imports: Option<&std::collections::HashMap<String, String>>,
     import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<String, CompileError> {
+    let output = compile_project_source_unformatted(source, declarations, imports, import_types)?;
+    format_output(source, &output)
+}
+
+pub(crate) fn compile_project_source_unformatted(
+    source: &str,
+    declarations: &[String],
+    imports: Option<&std::collections::HashMap<String, String>>,
+    import_types: Option<&std::collections::HashMap<String, String>>,
+) -> Result<String, CompileError> {
     let prepared = syntax::prepare(source);
     let lua_version = LuaVersion::cfxlua().with_luau();
     let parsed = full_moon::parse_fallible(&prepared.text, lua_version);
@@ -73,7 +83,7 @@ pub(crate) fn compile_project_source(
     } else {
         lowered
     };
-    format_output(source, &lowered)
+    Ok(lowered)
 }
 
 pub(crate) fn check_source_with_declarations(

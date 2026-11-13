@@ -232,6 +232,9 @@ pub(crate) fn rewrite(
     source: &str,
     resolved: &HashMap<String, String>,
 ) -> Result<String, CompileError> {
+    if resolved.is_empty() {
+        return Ok(source.to_owned());
+    }
     let prepared = super::syntax::prepare(source);
     let ast =
         full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())

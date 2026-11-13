@@ -133,6 +133,7 @@ fn visit_cycle<'a>(
     id: &'a str,
     modules: &'a BTreeMap<String, Module>,
     complete: &mut HashSet<String>,
+    order: &mut Vec<String>,
 ) -> Result<(), BuildError> {
     if complete.contains(id) {
         return Ok(());
@@ -143,6 +144,7 @@ fn visit_cycle<'a>(
         let module = &modules[current];
         if next == module.edges.len() {
             complete.insert(current.to_owned());
+            order.push(current.to_owned());
             active.remove(current);
             stack.pop();
             continue;
@@ -352,36 +354,23 @@ impl Project {
             return Ok(plan);
         }
         let mut complete = HashSet::new();
+        let mut dependency_order = Vec::with_capacity(modules.len());
         for id in modules.keys() {
-            visit_cycle(id, &modules, &mut complete)?;
+            visit_cycle(id, &modules, &mut complete, &mut dependency_order)?;
         }
 
         let mut export_types = HashMap::<String, String>::new();
-        while export_types.len() < modules.len() {
-            let mut progressed = false;
-            for (id, module) in &modules {
-                if export_types.contains_key(id)
-                    || module
-                        .edges
-                        .iter()
-                        .any(|(_, target)| !export_types.contains_key(target))
-                {
-                    continue;
-                }
-                let import_types = module
-                    .edges
-                    .iter()
-                    .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
-                    .collect::<HashMap<_, _>>();
-                let export_type =
-                    crate::compiler::infer_module_export_type(&module.source, &import_types);
-                plan.import_types.insert(module.path.clone(), import_types);
-                export_types.insert(id.clone(), export_type);
-                progressed = true;
-            }
-            if !progressed {
-                break;
-            }
+        for id in dependency_order {
+            let module = &modules[&id];
+            let import_types = module
+                .edges
+                .iter()
+                .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
+                .collect::<HashMap<_, _>>();
+            let export_type =
+                crate::compiler::infer_module_export_type(&module.source, &import_types);
+            plan.import_types.insert(module.path.clone(), import_types);
+            export_types.insert(id.clone(), export_type);
         }
 
         let mut declared = HashMap::<String, u8>::new();
