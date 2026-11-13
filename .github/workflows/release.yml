@@ -56,7 +56,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'release' || github.event_name == 'workflow_call'
+    if: github.event_name == 'release' || github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -108,7 +108,7 @@ jobs:
           npm publish ./packages/luat --access public --provenance
 
   attach-release-assets:
-    if: github.event_name == 'release' || github.event_name == 'workflow_call'
+    if: github.event_name == 'release' || github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     permissions:
