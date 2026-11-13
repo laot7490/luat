@@ -1,0 +1,66 @@
+name: Release on version update
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: version-release-master
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.release.outputs.created }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check release tag
+        id: version
+        shell: bash
+        run: |
+          current="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$current" ]; then
+            echo 'Cargo.toml does not contain a numeric release version.' >&2
+            exit 1
+          fi
+          tag="v$current"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            should_release=false
+          else
+            should_release=true
+          fi
+          latest_tag="$(git tag --merged HEAD --list 'v[0-9]*' --sort=-version:refname | head -n1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+      - name: Install Git Cliff
+        if: steps.version.outputs.should_release == 'true'
+        uses: taiki-e/install-action@git-cliff
+      - name: Publish release with Git Cliff notes
+        id: release
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          if [ -n "$LATEST_TAG" ]; then
+            git cliff "$LATEST_TAG..$TARGET_SHA" --tag "$TAG" --config cliff.toml --output release-notes.md
+          else
+            git cliff --unreleased --tag "$TAG" --config cliff.toml --output release-notes.md
+          fi
+          gh release create "$TAG" --target "$TARGET_SHA" --title "$TAG" --notes-file release-notes.md
+          echo 'created=true' >> "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    needs: create-release
+    if: needs.create-release.outputs.created == 'true'
+    uses: ./.github/workflows/release.yml
