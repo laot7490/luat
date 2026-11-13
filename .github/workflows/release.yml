@@ -1,149 +1,73 @@
-name: Release LuaT
+name: Release - CLI and Language Server
+run-name: Release - ${{ inputs.product || 'changed products' }} - ${{ inputs.release_tag || github.sha }}
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Existing release tag to publish
+      product:
+        description: Product to recover from an existing tag
+        type: choice
+        options: [cli, lsp]
         required: true
-        type: string
-  release:
-    types: [published]
-  workflow_call:
-    inputs:
       release_tag:
-        required: true
+        description: Existing stable tag (v0.1.6 or lsp-v0.1.0)
         type: string
+        required: true
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            package: luat-win32-x64
-            executable: luat.exe
-          - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-            package: luat-linux-x64
-            executable: luat
-            cross: true
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
-            package: luat-linux-arm64
-            executable: luat
-            cross: true
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            package: luat-darwin-x64
-            executable: luat
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-            package: luat-darwin-arm64
-            executable: luat
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - if: matrix.cross
-        uses: taiki-e/install-action@cross
-      - if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }}
-      - if: ${{ !matrix.cross }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.package }}
-          path: target/${{ matrix.target }}/release/${{ matrix.executable }}
-          if-no-files-found: error
-
-  publish:
-    if: github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-    needs: build
+  resolve-release:
+    name: Resolve product versions and source
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      cli_tag: ${{ steps.resolve.outputs.cli_tag }}
+      lsp_tag: ${{ steps.resolve.outputs.lsp_tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
-      - run: npm install --global npm@latest
-      - uses: actions/download-artifact@v4
-        with:
-          path: .release-artifacts
-      - name: Prepare packages
-        run: |
-          node scripts/sync-versions.mjs
-          cp README.md packages/luat/README.md
-          mkdir -p packages/luat-win32-x64/bin packages/luat-linux-x64/bin packages/luat-linux-arm64/bin packages/luat-darwin-x64/bin packages/luat-darwin-arm64/bin
-          cp .release-artifacts/luat-win32-x64/luat.exe packages/luat-win32-x64/bin/luat.exe
-          cp .release-artifacts/luat-linux-x64/luat packages/luat-linux-x64/bin/luat
-          cp .release-artifacts/luat-linux-arm64/luat packages/luat-linux-arm64/bin/luat
-          cp .release-artifacts/luat-darwin-x64/luat packages/luat-darwin-x64/bin/luat
-          cp .release-artifacts/luat-darwin-arm64/luat packages/luat-darwin-arm64/bin/luat
-          chmod +x packages/luat-linux-x64/bin/luat packages/luat-linux-arm64/bin/luat packages/luat-darwin-x64/bin/luat packages/luat-darwin-arm64/bin/luat
-      - name: Verify package metadata and license
-        run: |
-          for binary in packages/luat-win32-x64/bin/luat.exe packages/luat-linux-x64/bin/luat packages/luat-linux-arm64/bin/luat packages/luat-darwin-x64/bin/luat packages/luat-darwin-arm64/bin/luat; do
-            test -s "$binary"
-          done
-          node --input-type=module <<'NODE'
-          import { existsSync, readFileSync } from 'node:fs';
-          const cargo = readFileSync('Cargo.toml', 'utf8');
-          const version = cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-          const license = cargo.match(/^license\s*=\s*"([^"]+)"/m)?.[1];
-          if (!license || !existsSync('LICENSE')) throw new Error('Choose a license, add LICENSE, and set Cargo.toml license before publishing.');
-          for (const name of ['@luatlang/cli', 'luat-win32-x64', 'luat-linux-x64', 'luat-linux-arm64', 'luat-darwin-x64', 'luat-darwin-arm64']) {
-            const directory = name === '@luatlang/cli' ? 'luat' : name;
-            const pkg = JSON.parse(readFileSync(`packages/${directory}/package.json`, 'utf8'));
-            if (pkg.version !== version || pkg.license !== license) throw new Error(`${name} package version/license does not match Cargo.toml.`);
-          }
-          NODE
-      - name: Publish platform packages and CLI
-        run: |
-          for package in luat-win32-x64 luat-linux-x64 luat-linux-arm64 luat-darwin-x64 luat-darwin-arm64; do
-            npm publish "./packages/$package" --access public --provenance
-          done
-          npm publish ./packages/luat --access public --provenance
+      - name: Resolve immutable source and release decisions
+        id: resolve
+        run: node scripts/release.mjs resolve
 
-  attach-release-assets:
-    if: github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
-    needs: build
-    runs-on: ubuntu-latest
+  verify:
+    name: Verify selected source
+    needs: resolve-release
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.resolve-release.outputs.source_sha }}
+
+  release-cli:
+    name: Release CLI
+    needs: [resolve-release, verify]
+    if: needs.resolve-release.outputs.cli_tag != ''
     permissions:
       contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: .release-artifacts
-      - name: Prepare release assets
-        run: |
-          set -euo pipefail
-          mkdir -p target/release-assets
-          for package in luat-win32-x64 luat-linux-x64 luat-linux-arm64 luat-darwin-x64 luat-darwin-arm64; do
-            executable=luat
-            if [ "$package" = luat-win32-x64 ]; then
-              executable=luat.exe
-            else
-              chmod +x ".release-artifacts/$package/$executable"
-            fi
-            asset="target/release-assets/$package.tar.gz"
-            test -s ".release-artifacts/$package/$executable"
-            tar --mode=755 -czf "$asset" -C ".release-artifacts/$package" "$executable"
-            tar -tzf "$asset" >/dev/null
-          done
-      - name: Attach archives to GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
-        run: gh release upload "$RELEASE_TAG" target/release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/release-cli.yml
+    with:
+      source_sha: ${{ needs.resolve-release.outputs.source_sha }}
+      release_tag: ${{ needs.resolve-release.outputs.cli_tag }}
+
+  release-lsp:
+    name: Release Language Server and VS Code
+    needs: [resolve-release, verify]
+    if: needs.resolve-release.outputs.lsp_tag != ''
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    uses: ./.github/workflows/release-lsp.yml
+    with:
+      source_sha: ${{ needs.resolve-release.outputs.source_sha }}
+      release_tag: ${{ needs.resolve-release.outputs.lsp_tag }}

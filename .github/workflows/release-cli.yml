@@ -1,0 +1,154 @@
+name: Release - CLI
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT: cli
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+
+jobs:
+  build-cli:
+    name: Build CLI - ${{ matrix.platform }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, platform: win32-x64, executable: luat.exe }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, platform: linux-x64, executable: luat, cross: true }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-latest, platform: linux-arm64, executable: luat, cross: true }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, platform: darwin-x64, executable: luat }
+          - { target: aarch64-apple-darwin, runner: macos-latest, platform: darwin-arm64, executable: luat }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}
+      - if: matrix.cross
+        uses: taiki-e/install-action@cross
+      - if: matrix.cross
+        run: cross build -p luat --release --locked --target ${{ matrix.target }}
+      - if: ${{ !matrix.cross }}
+        run: cargo build -p luat --release --locked --target ${{ matrix.target }}
+      - name: Run native CLI smoke check
+        if: matrix.platform != 'linux-arm64'
+        shell: bash
+        run: target/${{ matrix.target }}/release/${{ matrix.executable }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-binary-${{ matrix.platform }}
+          path: target/${{ matrix.target }}/release/${{ matrix.executable }}
+          if-no-files-found: error
+
+  prepare-cli:
+    name: Inspect and prepare CLI release
+    needs: build-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@git-cliff
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-binary-*
+          path: target/release-binaries
+      - name: Validate release source and versions
+        run: node target/release-tools/scripts/release.mjs validate
+      - name: Prepare archives and npm tarballs
+        run: |
+          set -euo pipefail
+          mkdir -p target/release-prepared/assets target/release-prepared/npm
+          cp README.md packages/luat/README.md
+          for platform in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            executable=luat
+            if [ "$platform" = win32-x64 ]; then executable=luat.exe; fi
+            package="luat-$platform"
+            binary="target/release-binaries/cli-binary-$platform/$executable"
+            test -s "$binary"
+            file "$binary"
+            mkdir -p "packages/$package/bin"
+            cp "$binary" "packages/$package/bin/$executable"
+            chmod +x "packages/$package/bin/$executable"
+            cp LICENSE "packages/$package/LICENSE"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=755 -czf "target/release-prepared/assets/$package.tar.gz" -C "packages/$package/bin" "$executable"
+            tar -tzf "target/release-prepared/assets/$package.tar.gz"
+            npm pack "./packages/$package" --pack-destination target/release-prepared/npm
+          done
+          cp LICENSE packages/luat/LICENSE
+          npm pack ./packages/luat --pack-destination target/release-prepared/npm
+          node target/release-tools/scripts/release.mjs notes
+          node target/release-tools/scripts/release.mjs manifest
+          (cd target/release-prepared/assets && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-prepared-${{ inputs.source_sha }}
+          path: target/release-prepared/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-cli:
+    name: Publish CLI npm packages and GitHub release
+    needs: prepare-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: publish-cli-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@11.6.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-prepared-${{ inputs.source_sha }}
+          path: target/release-prepared
+      - name: Resume or publish CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node target/release-tools/scripts/release.mjs validate
+          node target/release-tools/scripts/release.mjs publish

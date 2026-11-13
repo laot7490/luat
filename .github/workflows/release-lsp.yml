@@ -1,0 +1,182 @@
+name: Release - Language Server and VS Code
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT: lsp
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+
+jobs:
+  build-language-server:
+    name: Build Language Server - ${{ matrix.platform }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, platform: win32-x64, executable: luat-lsp.exe }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, platform: linux-x64, executable: luat-lsp, cross: true }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-latest, platform: linux-arm64, executable: luat-lsp, cross: true }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, platform: darwin-x64, executable: luat-lsp }
+          - { target: aarch64-apple-darwin, runner: macos-latest, platform: darwin-arm64, executable: luat-lsp }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lsp-${{ matrix.target }}
+      - if: matrix.cross
+        uses: taiki-e/install-action@cross
+      - if: matrix.cross
+        run: cross build -p luat-lsp --release --locked --target ${{ matrix.target }}
+      - if: ${{ !matrix.cross }}
+        run: cargo build -p luat-lsp --release --locked --target ${{ matrix.target }}
+      - name: Test native Language Server transport
+        if: ${{ !matrix.cross }}
+        run: cargo test -p luat-lsp --locked --test stdio --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsp-binary-${{ matrix.platform }}
+          path: target/${{ matrix.target }}/release/${{ matrix.executable }}
+          if-no-files-found: error
+
+  package-vscode:
+    name: Package Language Server and VS Code
+    needs: build-language-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lsp/editors/vscode/package-lock.json
+      - uses: taiki-e/install-action@git-cliff
+      - run: npm ci
+        working-directory: lsp/editors/vscode
+      - run: npm run compile
+        working-directory: lsp/editors/vscode
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lsp-binary-*
+          path: target/release-binaries
+      - name: Inspect and prepare platform packages
+        run: |
+          set -euo pipefail
+          node target/release-tools/scripts/release.mjs validate
+          mkdir -p target/release-prepared/assets
+          for platform in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            executable=luat-lsp
+            if [ "$platform" = win32-x64 ]; then executable=luat-lsp.exe; fi
+            binary="target/release-binaries/lsp-binary-$platform/$executable"
+            test -s "$binary"
+            file "$binary"
+            node target/release-tools/scripts/package-lsp.mjs "$platform" "$binary" target/release-prepared/assets
+            tar -tzf "target/release-prepared/assets/luat-lsp-$platform.tar.gz"
+          done
+          node target/release-tools/scripts/release.mjs notes
+          node target/release-tools/scripts/release.mjs manifest
+          (cd target/release-prepared/assets && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsp-prepared-${{ inputs.source_sha }}
+          path: target/release-prepared/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-vscode-marketplace:
+    name: Publish VS Code Marketplace extension
+    needs: package-vscode
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: publish-lsp-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lsp/editors/vscode/package-lock.json
+      - run: npm ci
+        working-directory: lsp/editors/vscode
+      - uses: actions/download-artifact@v4
+        with:
+          name: lsp-prepared-${{ inputs.source_sha }}
+          path: target/release-prepared
+      - name: Publish all platform packages with Trusted Publishing
+        run: >-
+          npx @vscode/vsce publish --oidc --skip-duplicate --packagePath
+          ../../../target/release-prepared/assets/luat-vscode-win32-x64.vsix
+          ../../../target/release-prepared/assets/luat-vscode-linux-x64.vsix
+          ../../../target/release-prepared/assets/luat-vscode-linux-arm64.vsix
+          ../../../target/release-prepared/assets/luat-vscode-darwin-x64.vsix
+          ../../../target/release-prepared/assets/luat-vscode-darwin-arm64.vsix
+        working-directory: lsp/editors/vscode
+
+  publish-github-release:
+    name: Publish Language Server GitHub release
+    needs: [package-vscode, publish-vscode-marketplace]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: publish-lsp-${{ inputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: lsp-prepared-${{ inputs.source_sha }}
+          path: target/release-prepared
+      - name: Resume or publish Language Server release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node target/release-tools/scripts/release.mjs validate
+          node target/release-tools/scripts/release.mjs publish

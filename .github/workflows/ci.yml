@@ -1,0 +1,94 @@
+name: CI - Rust, CLI and VS Code
+run-name: CI - ${{ github.event_name }} - ${{ inputs.source_sha || github.ref_name }}
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.source_sha || 'head' }}
+  cancel-in-progress: true
+
+jobs:
+  verify-rust:
+    name: Verify Rust and CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check independent package versions
+        run: |
+          node --input-type=module <<'NODE'
+          import { checkVersions } from './target/release-tools/scripts/sync-versions.mjs';
+          await checkVersions(process.cwd(), 'cli');
+          await checkVersions(process.cwd(), 'lsp');
+          NODE
+      - name: Test release and version scripts
+        run: node --test target/release-tools/scripts/*.test.mjs lsp/scripts/*.test.mjs
+      - name: Check and build a sample CLI project
+        run: |
+          mkdir -p target/tests/ci-smoke/src/client
+          printf '[project]\nname = "ci-smoke"\n[fivem]\nclient = ["src/client/main.luat"]\n' > target/tests/ci-smoke/luat.toml
+          printf 'local count: number = 1\n' > target/tests/ci-smoke/src/client/main.luat
+          cargo run -p luat --locked -- check --project target/tests/ci-smoke
+          cargo run -p luat --locked -- build --project target/tests/ci-smoke
+
+  verify-vscode:
+    name: Verify VS Code and Linux package
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: target/release-tools
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lsp/editors/vscode/package-lock.json
+      - run: npm ci
+        working-directory: lsp/editors/vscode
+      - run: npm run typecheck
+        working-directory: lsp/editors/vscode
+      - run: cargo build -p luat-lsp --locked
+      - name: Test the VS Code extension host
+        env:
+          LUAT_LSP_SERVER: ${{ github.workspace }}/target/debug/luat-lsp
+        run: xvfb-run -a npm test
+        working-directory: lsp/editors/vscode
+      - name: Package and inspect Linux VSIX
+        run: node target/release-tools/scripts/package-lsp.mjs linux-x64 target/debug/luat-lsp target/tests/ci-vsix
