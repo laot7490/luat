@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       created: ${{ steps.release.outputs.created }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,3 +65,5 @@ jobs:
     needs: create-release
     if: needs.create-release.outputs.created == 'true'
     uses: ./.github/workflows/release.yml
+    with:
+      release_tag: ${{ needs.create-release.outputs.tag }}
