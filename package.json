@@ -3,9 +3,18 @@
 	"private": true,
 	"scripts": {
 		"local": "cargo install --path . --force",
+		"lsp:build": "node scripts/build-lsp.mjs",
 		"prepare:major": "node scripts/prepare-version.mjs major",
 		"prepare:minor": "node scripts/prepare-version.mjs minor",
 		"prepare:patch": "node scripts/prepare-version.mjs patch",
-		"sync:versions": "node scripts/sync-versions.mjs"
+		"sync:versions": "node scripts/sync-versions.mjs",
+		"sync:versions:cli": "node scripts/sync-versions.mjs cli",
+		"sync:versions:lsp": "node scripts/sync-versions.mjs lsp",
+		"prepare:cli:major": "node scripts/prepare-version.mjs major cli",
+		"prepare:cli:minor": "node scripts/prepare-version.mjs minor cli",
+		"prepare:cli:patch": "node scripts/prepare-version.mjs patch cli",
+		"prepare:lsp:major": "node scripts/prepare-version.mjs major lsp",
+		"prepare:lsp:minor": "node scripts/prepare-version.mjs minor lsp",
+		"prepare:lsp:patch": "node scripts/prepare-version.mjs patch lsp"
 	}
 }

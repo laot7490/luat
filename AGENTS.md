@@ -11,9 +11,11 @@ LuaT is a Rust compiler and CLI for typed Lua targeting CfxLua. Core code lives 
 - `cargo fmt --check` checks Rust formatting; run `cargo fmt` to apply it.
 - `cargo run -- check --project example` checks the sample resource with the local CLI.
 - `cargo run -- build --project example` builds the sample resource.
-- `pnpm sync:versions` synchronizes versions across npm packages after changing release versions.
+- `npm run sync:versions` synchronizes versions across npm packages after changing release versions.
 
-Run Rust commands from the repository root. The root pnpm workspace has no general test or lint script; use Cargo for compiler checks.
+Run Rust commands from the repository root. Use Cargo for compiler checks.
+
+Use only `npm` for package manager. Do not use any other package manager.
 
 Keep the repository root limited to its existing project files. Create a new root-level file or directory only when the task explicitly requires it; put source in the existing project structure and temporary or generated files under `target/`.
 

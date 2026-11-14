@@ -1,6 +1,6 @@
 /target/
+**/target/
 /.cargo-home/
 /dist/
-/example
 /node_modules/
-/packages/*/node_modules/
+**/node_modules/

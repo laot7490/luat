@@ -14,7 +14,6 @@ declarations = ['types/fivem.d.luat']
 [fivem]
 fx_version = 'cerulean'
 game = 'gta5'
-games = ['gta5', 'rdr3']
 shared = ['@ox_lib/init.lua', 'src/shared/config.luat']
 client = ['src/client/main.luat']
 server = ['@oxmysql/lib/MySQL.lua', 'src/server/main.luat']
@@ -36,9 +35,6 @@ clr_disable_task_scheduler = false
 before_level_meta = 'data/before.meta'
 after_level_meta = 'data/after.meta'
 replace_level_meta = 'data/replacement.meta'
-# Deprecated; use fx_version instead.
-resource_manifest_version = '44febabe-d386-4d18-afbe-5e627f4af937'
-lua54 = true
 
 # Add one table per data_file entry.
 [[fivem.data_file]]
