@@ -205,9 +205,9 @@ async function publish(directory, product, tag, sha) {
     const body = `${await readFile(path.join(directory, 'notes.md'), 'utf8')}\n<!-- luat-release-run:${process.env.GITHUB_RUN_ID} -->\n`;
     const notesFile = path.join(directory, 'publish-notes.md');
     await writeFile(notesFile, body);
-    run('gh', ['release', 'create', tag, '--repo', repository, '--target', sha, '--draft', '--title', title, '--notes-file', notesFile]);
-    release = lookup();
-    if (!release) throw new Error('Created draft release was not found');
+    release = JSON.parse(run('gh', ['api', `repos/${repository}/releases`, '--method', 'POST', '--input', '-'], {
+      input: JSON.stringify({ tag_name: tag, target_commitish: sha, name: title, body, draft: true }),
+    }));
   }
   // Older assets may not have server-side digests; hash their downloaded bytes.
   const existing = [];
