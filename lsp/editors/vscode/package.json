@@ -46,7 +46,10 @@
 			{
 				"language": "luat",
 				"scopeName": "source.luat",
-				"path": "./syntaxes/luat.tmLanguage.json"
+				"path": "./syntaxes/luat.tmLanguage.json",
+				"tokenTypes": {
+					"meta.embedded.inline.luat": "other"
+				}
 			}
 		],
 		"commands": [

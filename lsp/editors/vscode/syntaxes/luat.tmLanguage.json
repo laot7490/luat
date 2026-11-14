@@ -32,6 +32,16 @@
 		}
 	],
 	"repository": {
+		"member-access": {
+			"patterns": [
+				{ "name": "keyword.operator.luat", "match": "\\." },
+				{ "name": "variable.other.property.luat", "match": "(?<=\\.)[A-Za-z_][A-Za-z0-9_]*" }
+			]
+		},
+		"interpolation-identifiers": {
+			"name": "variable.other.readwrite.luat",
+			"match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+		},
 		"function-call": {
 			"name": "entity.name.function.luat",
 			"match": "\\b(?!(?:if|elseif|while|for|function|typedef|typeof)\\b)[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
@@ -193,7 +203,9 @@
 							{ "include": "#keywords" },
 							{ "include": "#types" },
 							{ "include": "#numbers" },
-							{ "include": "#function-call" }
+							{ "include": "#function-call" },
+							{ "include": "#member-access" },
+							{ "include": "#interpolation-identifiers" }
 						]
 						}
 					]

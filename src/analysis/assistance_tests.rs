@@ -61,6 +61,37 @@ fn nested_callback_record_hover_keeps_plain_fields_and_empty_parameters() {
 }
 
 #[test]
+fn callback_record_hover_handles_method_access_and_explicit_self() {
+    let source = "local service = { current = player, getName = function(self): string return self.current.name end }\nlocal currentName = service:getName()\nservice.getName(service)";
+    let (snapshot, path) = analyze(&source);
+    for (call, expected) in [
+        ("service:getName()", "function service:getName(): string"),
+        ("service.getName(service)", "function service.getName("),
+    ] {
+        let offset = source.find(call).unwrap() + call.find("getName").unwrap();
+        let hover = snapshot.hover(&path, offset).unwrap();
+        assert_eq!(&source[hover.range], "getName");
+        assert!(hover.contents.contains(expected));
+        if call.contains(".getName") {
+            assert!(hover.contents.contains("self:"));
+            assert!(hover.contents.contains(": string"));
+        }
+    }
+}
+
+#[test]
+fn template_interpolations_keep_member_semantic_tokens() {
+    let source = "local player = { name = 'Ada' }\nlocal status = 'ready'\nlocal greeting = `Hoş geldin, {player.name}! Durum: {status}.`";
+    let (snapshot, path) = analyze(&source);
+    let tokens = snapshot.semantic_tokens(&path);
+    for name in ["player", "name", "status"] {
+        let start = source.rfind(name).unwrap();
+        let token = tokens.iter().find(|(range, _, _)| range.start == start).unwrap();
+        assert_eq!(&source[token.0.clone()], name);
+    }
+}
+
+#[test]
 fn callback_record_hover_uses_updated_buffers_and_keeps_old_snapshots() {
     let path = PathBuf::from("target/tests/callback-hover.luat");
     let mut host = AnalysisHost::new();

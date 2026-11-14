@@ -488,7 +488,12 @@ impl AnalysisSnapshot {
             return None;
         }
         let range = file.identifier_range_at(offset)?;
-        let before = file.source[..range.start].trim_end().strip_suffix('.')?;
+        let before = file.source[..range.start].trim_end();
+        let (before, method) = if let Some(before) = before.strip_suffix(':') {
+            (before, true)
+        } else {
+            (before.strip_suffix('.')?, false)
+        };
         let expression = self.receiver_expression(&file.source, before.len())?;
         let (context, ty) = self.receiver_type(path, range.start, expression)?;
         let field = self
@@ -498,7 +503,7 @@ impl AnalysisSnapshot {
         Some(HoverResult {
             range,
             contents: hover_markdown(
-                &field.signature(expression, false).map_or_else(
+                &field.signature(expression, method).map_or_else(
                     || format!("{}: {}", field.name, field.type_name),
                     |signature| signature.label,
                 ),
