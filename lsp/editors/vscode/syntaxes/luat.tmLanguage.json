@@ -183,13 +183,17 @@
 							"name": "meta.interpolation.luat",
 							"begin": "\\{",
 						"end": "\\}",
-						"patterns": [
+							"beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.luat" } },
+							"endCaptures": { "0": { "name": "punctuation.section.interpolation.end.luat" } },
+							"contentName": "meta.embedded.inline.luat",
+							"patterns": [
 							{ "include": "#comments" },
 							{ "include": "#strings" },
 							{ "include": "#operators" },
 							{ "include": "#keywords" },
 							{ "include": "#types" },
-							{ "include": "#numbers" }
+							{ "include": "#numbers" },
+							{ "include": "#function-call" }
 						]
 						}
 					]

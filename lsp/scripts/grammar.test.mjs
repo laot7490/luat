@@ -34,7 +34,11 @@ test('TextMate grammar scopes operators and protects comments and strings', () =
 	assert.equal(longString.end, longComment.end);
 	const template = grammar.repository.strings.patterns.find(pattern => pattern.name === 'string.template.luat');
 	const interpolation = template.patterns.find(pattern => pattern.name === 'meta.interpolation.luat');
+	assert.equal(interpolation.contentName, 'meta.embedded.inline.luat');
+	assert.equal(interpolation.beginCaptures['0'].name, 'punctuation.section.interpolation.begin.luat');
+	assert.equal(interpolation.endCaptures['0'].name, 'punctuation.section.interpolation.end.luat');
 	assert.ok(interpolation.patterns.some(pattern => pattern.include === '#operators'));
+	assert.ok(interpolation.patterns.some(pattern => pattern.include === '#function-call'));
 	const signatureOperators = grammar.repository['signature-parameters'].patterns;
 	assert.ok(signatureOperators.some(pattern => pattern.include === '#operators'));
 });
