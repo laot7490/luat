@@ -7,12 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       product:
-        description: Product to recover from an existing tag
+        description: Product to release or recover from an existing tag
         type: choice
         options: [cli, lsp]
         required: true
       release_tag:
-        description: Existing stable tag (v0.1.6 or lsp-v0.1.0)
+        description: Stable release tag (v0.2.0 or lsp-v0.1.0)
         type: string
         required: true
 

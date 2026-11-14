@@ -102,8 +102,13 @@ async function resolve() {
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
   if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
     const { product, release_tag: tag } = event.inputs;
-    const sha = resolveSource(product, tag, null);
-    if (manifestAt(sha, product) !== tagVersion(product, tag)) throw new Error('Tag does not match the tagged product manifest');
+    const taggedVersion = tagVersion(product, tag);
+    let tagged;
+    try { tagged = git(['rev-parse', '--verify', `refs/tags/${tag}^{commit}`]); }
+    catch (error) { if (error.status !== 128) throw error; }
+    const sha = tagged ? resolveSource(product, tag, null) : validateSha(process.env.GITHUB_SHA);
+    if (manifestAt(sha, product) !== taggedVersion) throw new Error('Release tag does not match the selected product manifest');
+    if (!tagged) resolveSource(product, tag, sha);
     await output({ source_sha: sha, cli_tag: product === 'cli' ? tag : '', lsp_tag: product === 'lsp' ? tag : '' });
   } else {
     const sha = validateSha(process.env.GITHUB_SHA);
