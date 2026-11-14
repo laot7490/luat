@@ -7,6 +7,9 @@ use crate::compiler::{
     imports::{ImportCall, lua_string},
 };
 
+pub(crate) type SourceParser<'a> =
+    dyn Fn(&Path, &str) -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError> + 'a;
+
 #[derive(Clone, Default)]
 pub(crate) struct ImportPlan {
     pub texts: HashMap<PathBuf, String>,
@@ -258,13 +261,7 @@ impl Project {
     pub(crate) fn analyze_imports_with_parser(
         &self,
         overlays: &HashMap<PathBuf, String>,
-        parse: Option<
-            &dyn Fn(
-                &Path,
-                &str,
-            )
-                -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError>,
-        >,
+        parse: Option<&SourceParser<'_>>,
         previous: Option<&ImportPlan>,
     ) -> Result<ImportPlan, BuildError> {
         if let (Some(parse), Some(old)) = (parse, previous) {

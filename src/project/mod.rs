@@ -410,11 +410,7 @@ impl Project {
         previous: Option<&imports::ImportPlan>,
         changed: &BTreeSet<PathBuf>,
         declarations: &DeclarationSet,
-        parse: &dyn Fn(
-            &Path,
-            &str,
-        )
-            -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError>,
+        parse: &imports::SourceParser<'_>,
     ) -> (BTreeSet<PathBuf>, Result<(), BuildError>, ResolvedImports) {
         let source_paths = self
             .source_paths()

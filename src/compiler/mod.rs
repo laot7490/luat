@@ -6,6 +6,8 @@ mod lower;
 pub(crate) mod syntax;
 pub(crate) mod typecheck;
 
+type ExportCache = std::sync::Arc<std::sync::Mutex<Option<(Vec<(String, String)>, String)>>>;
+
 #[derive(Clone)]
 pub(crate) struct ParsedSource {
     pub source: String,
@@ -13,7 +15,7 @@ pub(crate) struct ParsedSource {
     pub ast: full_moon::ast::Ast,
     pub diagnostics: Vec<Diagnostic>,
     pub syntax_valid: bool,
-    pub exports: std::sync::Arc<std::sync::Mutex<Option<(Vec<(String, String)>, String)>>>,
+    pub exports: ExportCache,
     pub imports:
         std::sync::Arc<std::sync::OnceLock<Result<Vec<imports::ImportCall>, CompileError>>>,
 }

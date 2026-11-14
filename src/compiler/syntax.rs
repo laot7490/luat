@@ -156,14 +156,15 @@ fn normalize_type_syntax(source: &str, arrays: bool) -> (String, Vec<usize>) {
         let candidates = tokens
             .windows(2)
             .enumerate()
-            .filter_map(|(index, pair)| {
-                (pair[0].to_string() == "[" && pair[1].to_string() == "]" && index > 0).then(|| {
-                    (
-                        tokens[index - 1].end_position().bytes(),
-                        pair[0].start_position().bytes(),
-                        pair[1].end_position().bytes(),
-                    )
-                })
+            .filter(|&(index, pair)| {
+                pair[0].to_string() == "[" && pair[1].to_string() == "]" && index > 0
+            })
+            .map(|(index, pair)| {
+                (
+                    tokens[index - 1].end_position().bytes(),
+                    pair[0].start_position().bytes(),
+                    pair[1].end_position().bytes(),
+                )
             })
             .collect::<Vec<_>>();
         if arrays && candidates.is_empty() {

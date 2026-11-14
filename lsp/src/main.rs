@@ -113,7 +113,7 @@ impl Backend {
             let mut indexed = false;
             loop {
                 pending.notified().await;
-                while indexed {
+                if indexed {
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_millis(150)) => break,
                         _ = pending.notified() => {}
@@ -692,7 +692,7 @@ impl LanguageServer for Backend {
                 uri,
                 edits
                     .into_iter()
-                    .map(|edit| to_lsp_text_edit(&source, edit))
+                    .map(|edit| to_lsp_text_edit(source, edit))
                     .collect(),
             );
         }

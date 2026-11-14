@@ -910,15 +910,14 @@ impl TypeChecker<'_> {
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
         let previous = self.position.get();
         let _position = PositionGuard(&self.position, previous);
-        if let (Some(start), Some(end)) = (expression.start_position(), expression.end_position()) {
-            if self
+        if let (Some(start), Some(end)) = (expression.start_position(), expression.end_position())
+            && self
                 .prepared
                 .text
                 .get(start.bytes()..end.bytes())
                 .is_some_and(|text| text.trim() == expression.to_string().trim())
-            {
-                self.position.set(start.bytes());
-            }
+        {
+            self.position.set(start.bytes());
         }
 
         match expression {
@@ -2596,13 +2595,11 @@ fn bind_generic_type(
     if let (Some(expected), Some(actual)) = (
         expected.strip_prefix('{').and_then(|s| s.strip_suffix('}')),
         actual.strip_prefix('{').and_then(|s| s.strip_suffix('}')),
-    ) {
-        if split_once_top_level(expected, ':').is_none()
-            && split_once_top_level(actual, ':').is_none()
-        {
-            bind_generic_type(expected, actual, parameters, bindings, conflicts);
-            return;
-        }
+    ) && split_once_top_level(expected, ':').is_none()
+        && split_once_top_level(actual, ':').is_none()
+    {
+        bind_generic_type(expected, actual, parameters, bindings, conflicts);
+        return;
     }
     if actual == "any" {
         return;
@@ -3846,15 +3843,15 @@ pub(crate) fn infer_module_export_type_from_ast(
     import_types: &HashMap<String, String>,
 ) -> String {
     let mut aliases = AliasCollector::default();
-    aliases.visit_ast(&ast);
+    aliases.visit_ast(ast);
     let mut functions = FunctionCollector::default();
     functions.add_vector_constructors();
-    functions.visit_ast(&ast);
+    functions.visit_ast(ast);
     let mut checker = TypeChecker {
         flow: Flow::collect(ast),
         position: std::cell::Cell::new(0),
         source,
-        prepared: &prepared,
+        prepared,
         import_types: Some(import_types),
         aliases: aliases.aliases,
         alias_scope_changes: Vec::new(),
@@ -3873,7 +3870,7 @@ pub(crate) fn infer_module_export_type_from_ast(
         pending_local_bindings: Vec::new(),
         diagnostics: Vec::new(),
     };
-    checker.visit_ast(&ast);
+    checker.visit_ast(ast);
     let mut types = checker
         .module_returns
         .into_iter()

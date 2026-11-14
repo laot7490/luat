@@ -34,18 +34,17 @@ impl Inputs {
             }
         };
         Arc::clone(input.file.get_or_init(|| {
-            if path.to_string_lossy().ends_with(".d.luat") {
-                if let Ok((prepared, ast, _)) =
+            if path.to_string_lossy().ends_with(".d.luat")
+                && let Ok((prepared, ast, _)) =
                     crate::compiler::declarations::parse_declaration_file(source)
-                {
-                    return Arc::new(AnalyzedFile::from_ast(
-                        source,
-                        prepared,
-                        &ast,
-                        Vec::new(),
-                        true,
-                    ));
-                }
+            {
+                return Arc::new(AnalyzedFile::from_ast(
+                    source,
+                    prepared,
+                    &ast,
+                    Vec::new(),
+                    true,
+                ));
             }
             Arc::new(AnalyzedFile::new(source, Vec::new()))
         }))

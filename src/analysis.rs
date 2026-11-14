@@ -806,6 +806,8 @@ impl std::fmt::Display for RenameError {
 
 impl std::error::Error for RenameError {}
 
+type SemanticTokenRange = (std::ops::Range<usize>, u32, u32);
+
 #[derive(Clone, Default)]
 pub struct AnalysisSnapshot {
     contexts: Arc<HashMap<PathBuf, Vec<crate::ExecutionContext>>>,
@@ -813,8 +815,7 @@ pub struct AnalysisSnapshot {
     project_symbols: Arc<HashMap<PathBuf, HashMap<String, Vec<ProjectSymbol>>>>,
     project_imports: Arc<HashMap<PathBuf, Vec<ImportBinding>>>,
     roots: Arc<HashMap<PathBuf, Option<PathBuf>>>,
-    semantic_cache:
-        Arc<std::sync::Mutex<HashMap<PathBuf, Vec<(std::ops::Range<usize>, u32, u32)>>>>,
+    semantic_cache: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<SemanticTokenRange>>>>,
     resolved_imports: Arc<crate::project::ResolvedImports>,
 }
 
@@ -2407,7 +2408,7 @@ fn exported_table_members(file: &AnalyzedFile, export_type: &str) -> HashMap<Str
     else {
         return HashMap::new();
     };
-    let signatures = SemanticCollector::new(source, &prepared);
+    let signatures = SemanticCollector::new(source, prepared);
     table
         .fields()
         .iter()
