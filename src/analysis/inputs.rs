@@ -117,12 +117,17 @@ mod tests {
     #[test]
     fn sibling_declaration_changes_revalidate_unchanged_documents() {
         let root = project("sibling-declarations");
+        fs::write(root.join("src/client/main.luat"), "print(1)").unwrap();
         let first = root.join("a.d.luat");
         let sibling = root.join("b.d.luat");
         let mut host = AnalysisHost::new();
         host.set_file(first.clone(), "typedef Derived = Base".into());
         host.set_file(sibling.clone(), "typedef Base = number".into());
-        assert!(host.snapshot().diagnostics(&first).unwrap().is_empty());
+        let diagnostics = host.snapshot().diagnostics(&first).unwrap().to_vec();
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
         host.set_file(sibling, "typedef Other = number".into());
         assert!(!host.snapshot().diagnostics(&first).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();

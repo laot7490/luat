@@ -91,4 +91,4 @@ jobs:
         run: mkdir -p ../../../target/tests && xvfb-run -a npm test
         working-directory: lsp/editors/vscode
       - name: Package and inspect Linux VSIX
-        run: node target/release-tools/scripts/package-lsp.mjs linux-x64 target/debug/luat-lsp target/tests/ci-vsix
+        run: node scripts/package-lsp.mjs linux-x64 target/debug/luat-lsp target/tests/ci-vsix
