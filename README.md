@@ -10,6 +10,8 @@
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license" /></a>
   </p>
 
+  <p><a href="https://marketplace.visualstudio.com/items?itemName=luat.luat-language-server"><strong>Get LuaT for Visual Studio Code →</strong></a></p>
+
   <p><a href="#what-luat-does">Features</a> · <a href="#get-started">Get started</a> · <a href="#commands">Commands</a> · <a href="#example-syntax">Example syntax</a> · <a href="#local-imports">Local imports</a> · <a href="#language-server">Language server</a> · <a href="#project-settings">Configuration</a>
 </div>
 
@@ -109,4 +111,12 @@ Imports are included in the built resource and work with Asset Escrow unlike the
 
 ## Language server
 
-LuaT includes a language server for `.luat` and `.d.luat` files. The VS Code extension and setup instructions are in [`lsp/editors/vscode`](lsp/editors/vscode/README.md); general LSP clients can run `luat-lsp --stdio`. See the [server guide](lsp/README.md) for build and release archive details.
+LuaT's language server provides editor features for `.luat` and `.d.luat` files, including diagnostics, completion, and navigation.
+
+### Use it in Visual Studio Code
+
+Install the [LuaT Language Server extension from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=luat.luat-language-server). Open your LuaT project in VS Code; the extension starts the language server for you. See the [VS Code setup guide](lsp/editors/vscode/README.md) for details.
+
+### Use it in another editor
+
+Editors with Language Server Protocol (LSP) support can connect to `luat-lsp --stdio`. See the [language server guide](lsp/README.md) for setup and release details.
