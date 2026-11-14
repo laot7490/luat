@@ -4,31 +4,31 @@
 ---@return clearId Used to clear the coroutine before it gets executed.
 ---@see Citizen.CreateThreadNow if you want to execute the coroutine immediately.
 ---@see Citizen.ClearTimeout if you want to clear the coroutine before it gets executed.
-function Citizen.CreateThread(threadFunction: (threadId: integer?) -> any): integer end
+function Citizen.CreateThread(threadFunction: (threadId: number?) -> any): number end
 
-function CreateThread(threadFunction: (threadId: integer?) -> any): integer end
+function CreateThread(threadFunction: (threadId: number?) -> any): number end
 
 ---Creates a coroutine to handle code asynchronously, executing immediately.
 ---@param threadFunction The function to run in the coroutine immediately. ``threadId`` is the id of the thread.
 ---@return Returns true if the coroutine was yielded.
 ---@see Citizen.CreateThread if you want to execute the coroutine on the next tick.
-function Citizen.CreateThreadNow(threadFunction: (threadId: integer?) -> any): boolean end
+function Citizen.CreateThreadNow(threadFunction: (threadId: number?) -> any): boolean end
 
 ---Executes a coroutine after the given time has passed in milliseconds.
 ---@param msec The time in milliseconds after which the callback should be executed.
 ---@param callback The callback function to execute after the timeout in a new coroutine. The threadId is the id of the thread.
 ---@return clearId Used to clear the coroutine before it gets executed.
 ---@see Citizen.ClearTimeout if you want to clear the coroutine before it gets executed.
-function Citizen.SetTimeout(msec: number, callback: (threadId: integer?) -> any): integer end
+function Citizen.SetTimeout(msec: number, callback: (threadId: number?) -> any): number end
 
-function SetTimeout(msec: number, callback: (threadId: integer?) -> any): integer end
+function SetTimeout(msec: number, callback: (threadId: number?) -> any): number end
 
 ---Cancels a coroutine before it gets executed.
 ---@param id The time in milliseconds after which the callback should be executed.
 ---@return removed Returns true if the coroutine was cancelled.
-function Citizen.ClearTimeout(id: integer): boolean end
+function Citizen.ClearTimeout(id: number): boolean end
 
-function ClearTimeout(id: integer): boolean end
+function ClearTimeout(id: number): boolean end
 
 ---Yields a coroutine, pausing execution for the given time in milliseconds
 ---@param msec The number of milliseconds to wait.
@@ -65,12 +65,12 @@ function Citizen.GetNative(nativeHash: number): (...any) -> any end
 ---Retrieves an initialized float value from a pointer. Same as `Citizen.PointerValueInt`, but this assumes the pointer is initialized.
 ---@param pointer The pointer to the address in the memory.
 ---@return The data retrieved by the pointer.
-function Citizen.PointerValueIntInitialized(pointer: integer): userdata end
+function Citizen.PointerValueIntInitialized(pointer: number): userdata end
 
 ---Retrieves an initialized integer value from a pointer. Same as `Citizen.PointerValueFloat`, but this assumes the pointer is initialized.
 ---@param pointer The pointer to the address in the memory.
 ---@return The data retrieved by the pointer.
-function Citizen.PointerValueFloatInitialized(pointer: integer): userdata end
+function Citizen.PointerValueFloatInitialized(pointer: number): userdata end
 
 ---Retrieves an integer value from a pointer.
 ---@return The data retrieved by the pointer.
@@ -90,11 +90,11 @@ function Citizen.ReturnResultAnyway(): any end
 
 ---Converts the result of a native invocation to an integer.
 ---@return The result as an integer.
-function Citizen.ResultAsInteger(): integer end
+function Citizen.ResultAsInteger(): number end
 
 ---Converts the result of a native invocation to a long integer.
 ---@return The result as a long integer.
-function Citizen.ResultAsLong(): integer end
+function Citizen.ResultAsLong(): number end
 
 ---Converts the result of a native invocation to a float.
 ---@return The result as a float.
@@ -161,7 +161,7 @@ function json.encode(object: any, state: json_encode_state?): string end
 ---@param objectmeta A metatable to assign to a decoded object instead of the builtin rapidjson table.
 ---@param arraymeta A metatable to assign to a decoded array instead of the builtin rapidjson table.
 ---@return object, integer? errPos, string? errMessage
-function json.decode(string: string, position: integer?, null: any?, objectmeta: table?, arraymeta: table?): (any?, integer?, string?) end
+function json.decode(string: string, position: number?, null: any?, objectmeta: table?, arraymeta: table?): (any?, number?, string?) end
 
 ---Returns a metatable with the 'object' __jsontype field.
 function json.object(): table end
@@ -260,21 +260,21 @@ typedef StateBag = { set: (self: StateBag, key: string, value: any, replicated: 
 
 typedef EntityInterface = { state: StateBag, __data: number }
 
-typedef EventHandler = { name: string, key: integer }
+typedef EventHandler = { name: string, key: number }
 
 typedef json_options = 'indent' | 'pretty' | 'sort_keys' | 'null' | 'nesting' | 'unsigned' | 'nan' | 'inf' | 'bit32' | 'lua_format_float' | 'lua_round_float' | 'single_line' | 'empty_table_as_array' | 'with_hole' | 'max_depth' | 'indent_char' | 'indent_count' | 'level' | 'decimal_count' | 'decoder_preset' | 'sentinel'
 
-typedef json_encode_state = { indent?: boolean, pretty?: boolean, sort_keys?: boolean, empty_table_as_array?: boolean, with_hole?: boolean, indent_amt?: integer, keyorder?: table, exception?: ((reason: 'reference cycle' | 'custom encoder failed' | 'unsupported type' | 'error encoding number', value: string) -> (string?, string))? }
+typedef json_encode_state = { indent?: boolean, pretty?: boolean, sort_keys?: boolean, empty_table_as_array?: boolean, with_hole?: boolean, indent_amt?: number, keyorder?: table, exception?: ((reason: 'reference cycle' | 'custom encoder failed' | 'unsupported type' | 'error encoding number', value: string) -> (string?, string))? }
 
 typedef msgpack_options = 'float' | 'double' | 'integer' | 'unsigne' | 'string_compat' | 'string_binary' | 'always_as_map' | 'without_hole' | 'with_hole' | 'empty_table_as_array' | 'sentinel' | 'ignore_invalid' | 'small_lua' | 'full64bits' | 'long_double'
 
-typedef promise = { value: any, state: integer, queue: { promise }, success: (value: any) -> any, failure: (value: any) -> any, resolve: (self: promise, value: any) -> promise, reject: (self: promise, value: any) -> promise, next: (self: promise, resolve: (value: any) -> any, reject: (value: any) -> any) -> promise }
+typedef promise = { value: any, state: number, queue: { promise }, success: (value: any) -> any, failure: (value: any) -> any, resolve: (self: promise, value: any) -> promise, reject: (self: promise, value: any) -> promise, next: (self: promise, resolve: (value: any) -> any, reject: (value: any) -> any) -> promise }
 
-typedef CitizenApi = { Await: (promise: promise) -> unknown, ClearTimeout: (id: integer) -> boolean, CreateThread: (threadFunction: (threadId: integer?) -> any) -> integer, CreateThreadNow: (threadFunction: (threadId: integer?) -> any) -> boolean, GetNative: (nativeHash: number) -> (...any) -> any, InvokeNative: (hash: number, ...any) -> any, InvokeNative2: (nativeHash: string, ...any) -> any, LoadNative: (nativeNative: string) -> (...any) -> any | nil, PointerValueFloat: () -> userdata, PointerValueFloatInitialized: (pointer: integer) -> userdata, PointerValueInt: () -> userdata, PointerValueIntInitialized: (pointer: integer) -> userdata, PointerValueVector: () -> userdata, ResultAsFloat: () -> number, ResultAsInteger: () -> integer, ResultAsLong: () -> integer, ResultAsObject: () -> (), ResultAsObject2: (msgpack_unpack: (...any) -> any) -> table, ResultAsString: () -> string, ResultAsVector: () -> vector2 | vector3 | vector4, ReturnResultAnyway: () -> any, SetTimeout: (msec: number, callback: (threadId: integer?) -> any) -> integer, Trace: (message: string | number) -> (), Wait: (msec: number) -> () }
+typedef CitizenApi = { Await: (promise: promise) -> unknown, ClearTimeout: (id: number) -> boolean, CreateThread: (threadFunction: (threadId: number?) -> any) -> number, CreateThreadNow: (threadFunction: (threadId: number?) -> any) -> boolean, GetNative: (nativeHash: number) -> (...any) -> any, InvokeNative: (hash: number, ...any) -> any, InvokeNative2: (nativeHash: string, ...any) -> any, LoadNative: (nativeNative: string) -> (...any) -> any | nil, PointerValueFloat: () -> userdata, PointerValueFloatInitialized: (pointer: number) -> userdata, PointerValueInt: () -> userdata, PointerValueIntInitialized: (pointer: number) -> userdata, PointerValueVector: () -> userdata, ResultAsFloat: () -> number, ResultAsInteger: () -> number, ResultAsLong: () -> number, ResultAsObject: () -> (), ResultAsObject2: (msgpack_unpack: (...any) -> any) -> table, ResultAsString: () -> string, ResultAsVector: () -> vector2 | vector3 | vector4, ReturnResultAnyway: () -> any, SetTimeout: (msec: number, callback: (threadId: number?) -> any) -> number, Trace: (message: string | number) -> (), Wait: (msec: number) -> () }
 
 declare Citizen: CitizenApi
 
-typedef JsonApi = { array: () -> table, decode: (string: string, position: integer?, null: any?, objectmeta: table?, arraymeta: table?) -> (any?, integer?, string?), encode: (object: any, state: json_encode_state?) -> string, getoption: (option: json_options) -> (), isarray: (value: table) -> boolean, isobject: (value: table) -> boolean, null: userdata, object: () -> table, sentinel: userdata, setoption: (option: json_options, value: any) -> () }
+typedef JsonApi = { array: () -> table, decode: (string: string, position: number?, null: any?, objectmeta: table?, arraymeta: table?) -> (any?, number?, string?), encode: (object: any, state: json_encode_state?) -> string, getoption: (option: json_options) -> (), isarray: (value: table) -> boolean, isobject: (value: table) -> boolean, null: userdata, object: () -> table, sentinel: userdata, setoption: (option: json_options, value: any) -> () }
 
 declare json: JsonApi
 

@@ -253,6 +253,7 @@ function convertType(type, aliases, sourcePath, report) {
 	}
 	if (value.endsWith("[]")) return `{ ${convertType(value.slice(0, -2), aliases, sourcePath, report)} }`;
 	if (value.startsWith("{") && value.endsWith("}")) return convertRecordType(value, aliases, sourcePath, report);
+	if (value === "integer") return "number";
 	if (PRIMITIVES.has(value) || aliases.has(value)) return value;
 	const genericStart = value.indexOf("<");
 	if (genericStart > 0 && value.endsWith(">")) {

@@ -23,5 +23,5 @@ for (const dependency of ['typescript/bin/tsc', 'esbuild/bin/esbuild', '@vscode/
 
 run('cargo', ['build', '--release', '-p', 'luat-lsp', '--locked'], root);
 
-run('npm', ['run', 'compile'], fileURLToPath(extension));
+run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'compile'], fileURLToPath(extension), process.platform === 'win32');
 await packageLsp(fileURLToPath(root), platform, fileURLToPath(new URL(`target/release/${executable}`, root)), fileURLToPath(new URL('target/release-assets/', root)));

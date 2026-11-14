@@ -11,7 +11,7 @@
 ---
 ---*   **conVarName**: The ConVar that changed.
 ---*   **reserved**: Currently unused.
-function AddConvarChangeListener(conVarFilter: string, handler: (...any) -> any): integer end
+function AddConvarChangeListener(conVarFilter: string, handler: (...any) -> any): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x5BA35AAF)  
@@ -34,7 +34,7 @@ function AddConvarChangeListener(conVarFilter: string, handler: (...any) -> any)
 ---
 ---If bagName refers to an entity, use [GET_ENTITY_FROM_STATE_BAG_NAME](#\_0x4BDF1867) to get the entity handle---
 ---If bagName refers to a player, use [GET_PLAYER_FROM_STATE_BAG_NAME](#\_0xA56135E0) to get the player handle
-function AddStateBagChangeHandler(keyFilter: string, bagFilter: string, handler: (...any) -> any): integer end
+function AddStateBagChangeHandler(keyFilter: string, bagFilter: string, handler: (...any) -> any): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xFA29D35D)  
@@ -48,7 +48,7 @@ function CancelEvent(): () end
 ---Creates a circle collision shape at the specified 2D position with the given radius.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapeCircle(x: number, y: number, radius: number): integer end
+function CreateColshapeCircle(x: number, y: number, radius: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x79AE8777)  
@@ -57,7 +57,7 @@ function CreateColshapeCircle(x: number, y: number, radius: number): integer end
 ---Creates a cuboid (axis-aligned box) collision shape at the specified 3D position.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapeCuboid(x: number, y: number, z: number, width: number, depth: number, height: number): integer end
+function CreateColshapeCuboid(x: number, y: number, z: number, width: number, depth: number, height: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x59AD59AC)  
@@ -66,7 +66,7 @@ function CreateColshapeCuboid(x: number, y: number, z: number, width: number, de
 ---Creates a cylinder collision shape at the specified 3D position.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapeCylinder(x: number, y: number, z: number, radius: number, height: number): integer end
+function CreateColshapeCylinder(x: number, y: number, z: number, radius: number, height: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x1B055F04)  
@@ -75,7 +75,7 @@ function CreateColshapeCylinder(x: number, y: number, z: number, radius: number,
 ---Creates a polygon collision shape defined by a set of 2D points extruded between `minZ` and `maxZ`. Requires at least 3 points.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapePolygon(minZ: number, maxZ: number, points: table): integer end
+function CreateColshapePolygon(minZ: number, maxZ: number, points: table): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x58C3F669)  
@@ -84,7 +84,7 @@ function CreateColshapePolygon(minZ: number, maxZ: number, points: table): integ
 ---Creates a rotated rectangle collision shape at the specified 3D position.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapeRectangle(x: number, y: number, z: number, width: number, depth: number, heading: number): integer end
+function CreateColshapeRectangle(x: number, y: number, z: number, width: number, depth: number, heading: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xB6710ACB)  
@@ -93,14 +93,14 @@ function CreateColshapeRectangle(x: number, y: number, z: number, width: number,
 ---Creates a sphere collision shape at the specified 3D position with the given radius.---
 ------
 ---When an entity enters or leaves a collision shape, the `onColshapeEnter` and `onColshapeExit` events are triggered. Both events are called with the entity handle that triggered them and the collision shape ID.
-function CreateColshapeSphere(x: number, y: number, z: number, radius: number): integer end
+function CreateColshapeSphere(x: number, y: number, z: number, radius: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x16B9F12B)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Deletes an existing collision shape by its ID.
-function DeleteColshape(colShapeId: integer): () end
+function DeleteColshape(colShapeId: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x1E86F206)  
@@ -122,12 +122,12 @@ function DeleteResourceKvpNoSync(key: string): () end
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether a collision shape with the given ID exists.
-function DoesColshapeExist(colShapeId: integer): boolean end
+function DoesColshapeExist(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x77CC80DC)  
 ---This native does not have an official description.
-function DoesTrainStopAtStations(train: integer): boolean end
+function DoesTrainStopAtStations(train: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xF4E2079D)  
@@ -137,12 +137,12 @@ function DuplicateFunctionReference(referenceIdentity: string): string end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xB3210203)  
 ---This native does not have an official description.
-function EndFindKvp(handle: integer): () end
+function EndFindKvp(handle: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x3BB78F05)  
 ---Internal function for ensuring an entity has a state bag.
-function EnsureEntityStateBag(entity: integer): () end
+function EnsureEntityStateBag(entity: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x561C060B)  
@@ -152,7 +152,7 @@ function ExecuteCommand(commandString: string): () end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xBD7BEBC5)  
 ---This native does not have an official description.
-function FindKvp(handle: integer): string end
+function FindKvp(handle: number): string end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xD70C3BCA)  
@@ -164,42 +164,42 @@ function FormatStackTrace(traceData: table): string end
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the circle collision shape data.
-function GetColshapeCircleData(colShapeId: integer): (boolean, number, number, number) end
+function GetColshapeCircleData(colShapeId: number): (boolean, number, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x9D0BC07C)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the cuboid collision shape data.
-function GetColshapeCuboidData(colShapeId: integer): (boolean, number, number, number, number, number, number) end
+function GetColshapeCuboidData(colShapeId: number): (boolean, number, number, number, number, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x83B79CDA)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the cylinder collision shape data.
-function GetColshapeCylinderData(colShapeId: integer): (boolean, number, number, number, number, number) end
+function GetColshapeCylinderData(colShapeId: number): (boolean, number, number, number, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xCD8BFE8D)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the polygon collision shape data. Returns an empty array if the ID is invalid or the shape is not a polygon.
-function GetColshapePolygonData(colShapeId: integer): (table, number, number) end
+function GetColshapePolygonData(colShapeId: number): (table, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xED8B05DF)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the rectangle collision shape data.
-function GetColshapeRectangleData(colShapeId: integer): (boolean, number, number, number, number, number, number) end
+function GetColshapeRectangleData(colShapeId: number): (boolean, number, number, number, number, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xFF94C6DB)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Gets the sphere collision shape data.
-function GetColshapeSphereData(colShapeId: integer): (boolean, number, number, number, number) end
+function GetColshapeSphereData(colShapeId: number): (boolean, number, number, number, number) end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x6CCD2564)  
@@ -219,7 +219,7 @@ function GetConvarFloat(varName: string, defaultValue: number): number end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x935C0AB2)  
 ---Can be used to get a console variable casted back to `int` (an integer value).
-function GetConvarInt(varName: string, default_: integer): integer end
+function GetConvarInt(varName: string, default_: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xE5E9EBBB)  
@@ -256,12 +256,12 @@ function GetCurrentResourceName(): string end
 ---end---
 ---
 ---```
-function GetEntitiesInRadius(x: number, y: number, z: number, radius: number, entityType: integer, sortByDistance: boolean, models: table): table end
+function GetEntitiesInRadius(x: number, y: number, z: number, radius: number, entityType: number, sortByDistance: boolean, models: table): table end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x4BDF1867)  
 ---Returns the entity handle for the specified state bag name. For use with [ADD_STATE_BAG_CHANGE_HANDLER](#\_0x5BA35AAF).
-function GetEntityFromStateBagName(bagName: string): integer end
+function GetEntityFromStateBagName(bagName: string): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x804B9F7B)  
@@ -296,7 +296,7 @@ function GetEntityFromStateBagName(bagName: string): integer end
 ---    *   43
 ---*   FXServer
 ---    *   0
-function GetGameBuildNumber(): integer end
+function GetGameBuildNumber(): number end
 
 function GetGameName(): string end
 
@@ -321,7 +321,7 @@ function GetGamePool(poolName: string): table end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x9F1C4383)  
 ---This native does not have an official description.
-function GetInstanceId(): integer end
+function GetInstanceId(): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x4D52FE5B)  
@@ -332,37 +332,37 @@ function GetInvokingResource(): string end
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x776E864)  
 ---Gets the amount of metadata values with the specified key existing in the specified resource's manifest.---
 ---See also: [Resource manifest](https://docs.fivem.net/docs/scripting-reference/resource-manifest/)
-function GetNumResourceMetadata(resourceName: string, metadataKey: string): integer end
+function GetNumResourceMetadata(resourceName: string, metadataKey: string): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x863F27B)  
 ---This native does not have an official description.
-function GetNumResources(): integer end
+function GetNumResources(): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xA56135E0)  
 ---On the server this will return the players source, on the client it will return the player handle.
-function GetPlayerFromStateBagName(bagName: string): integer end
+function GetPlayerFromStateBagName(bagName: string): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x8689A825)  
 ---A getter for [SET_PLAYER_MELEE_WEAPON_DAMAGE_MODIFIER](#\_0x4A3DC7ECCC321032).
-function GetPlayerMeleeWeaponDamageModifier(playerId: integer): number end
+function GetPlayerMeleeWeaponDamageModifier(playerId: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x2A3D7CDA)  
 ---A getter for [SET_PLAYER_WEAPON_DAMAGE_MODIFIER](#\_0xCE07B9F7817AADA3).
-function GetPlayerWeaponDamageModifier(playerId: integer): number end
+function GetPlayerWeaponDamageModifier(playerId: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xF1543251)  
 ---A getter for [SET_PLAYER_WEAPON_DEFENSE_MODIFIER](#\_0x2D83BC011CA14A3C).
-function GetPlayerWeaponDefenseModifier(playerId: integer): number end
+function GetPlayerWeaponDefenseModifier(playerId: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x986B65FF)  
 ---A getter for [\_SET_PLAYER_WEAPON_DEFENSE_MODIFIER\_2](#\_0xBCFDE9EDE4CF27DC).
-function GetPlayerWeaponDefenseModifier_2(playerId: integer): number end
+function GetPlayerWeaponDefenseModifier_2(playerId: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xD4BEF069)  
@@ -388,7 +388,7 @@ function GetRegisteredCommands(): table end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x387246B7)  
 ---This native does not have an official description.
-function GetResourceByFindIndex(findIndex: integer): string end
+function GetResourceByFindIndex(findIndex: number): string end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x97628584)  
@@ -419,7 +419,7 @@ function GetResourceKvpFloat(key: string): number end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x557B586A)  
 ---A getter for [SET_RESOURCE_KVP_INT](#\_0x6A2B1E8).
-function GetResourceKvpInt(key: string): integer end
+function GetResourceKvpInt(key: string): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x5240DA5A)  
@@ -431,7 +431,7 @@ function GetResourceKvpString(key: string): string end
 ---Gets the metadata value at a specified key/index from a resource's manifest.---
 ---See also: [Resource manifest](https://docs.fivem.net/docs/scripting-reference/resource-manifest/)
 ---@param index [default: 0]
-function GetResourceMetadata(resourceName: string, metadataKey: string, index: integer?): string end
+function GetResourceMetadata(resourceName: string, metadataKey: string, index: number?): string end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x4039B485)  
@@ -451,32 +451,32 @@ function GetStateBagValue(bagName: string, key: string): table end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xA4921EF5)  
 ---Gets the trains desired speed.
-function GetTrainCruiseSpeed(train: integer): number end
+function GetTrainCruiseSpeed(train: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x8DAF79B6)  
 ---Gets the direction the train is facing
-function GetTrainDirection(train: integer): boolean end
+function GetTrainDirection(train: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x81B50033)  
 ---This native does not have an official description.
-function GetTrainState(train: integer): integer end
+function GetTrainState(train: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x9AA339D)  
 ---This native does not have an official description.
-function GetTrainTrackIndex(train: integer): integer end
+function GetTrainTrackIndex(train: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x483B013C)  
 ---This native does not have an official description.
-function GetVehicleHandbrake(vehicle: integer): boolean end
+function GetVehicleHandbrake(vehicle: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x1382FCEA)  
 ---This native does not have an official description.
-function GetVehicleSteeringAngle(vehicle: integer): number end
+function GetVehicleSteeringAngle(vehicle: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xA273060E)  
@@ -494,7 +494,7 @@ function GetVehicleSteeringAngle(vehicle: integer): number end
 ---*   submarine
 ---*   trailer
 ---*   train
-function GetVehicleType(vehicle: integer): string end
+function GetVehicleType(vehicle: number): string end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x7EBB9929)  
@@ -506,49 +506,49 @@ function IsAceAllowed(object: string): boolean end
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a circle type.
-function IsColshapeCircle(colShapeId: integer): boolean end
+function IsColshapeCircle(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x80A7B8DF)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a cuboid type.
-function IsColshapeCuboid(colShapeId: integer): boolean end
+function IsColshapeCuboid(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xA9CC9F3D)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a cylinder type.
-function IsColshapeCylinder(colShapeId: integer): boolean end
+function IsColshapeCylinder(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xB5B22C62)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape has a specific entity type enabled for detection.
-function IsColshapeEntityTypeSet(colShapeId: integer, entityType: integer): boolean end
+function IsColshapeEntityTypeSet(colShapeId: number, entityType: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x91E01B1E)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a polygon type.
-function IsColshapePolygon(colShapeId: integer): boolean end
+function IsColshapePolygon(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xAE0F25EA)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a rectangle type.
-function IsColshapeRectangle(colShapeId: integer): boolean end
+function IsColshapeRectangle(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xC53E0758)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Returns whether the collision shape is a sphere type.
-function IsColshapeSphere(colShapeId: integer): boolean end
+function IsColshapeSphere(colShapeId: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xCF24C52E)  
@@ -558,14 +558,14 @@ function IsDuplicityVersion(): boolean end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xEDBE6ADD)  
 ---A getter for [FREEZE_ENTITY_POSITION](#\_0x428CA6DBD1094446).
-function IsEntityPositionFrozen(entity: integer): boolean end
+function IsEntityPositionFrozen(entity: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x324DCFA6)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Tests whether a 3D point is inside the specified collision shape.
-function IsPointInsideColshape(colShapeId: integer, x: number, y: number, z: number): boolean end
+function IsPointInsideColshape(colShapeId: number, x: number, y: number, z: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x37CF52CE)  
@@ -575,7 +575,7 @@ function IsPrincipalAceAllowed(principal: string, object: string): boolean end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xBB340D04)  
 ---This native does not have an official description.
-function IsVehicleEngineStarting(vehicle: integer): boolean end
+function IsVehicleEngineStarting(vehicle: number): boolean end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x76A9EE1F)  
@@ -584,12 +584,12 @@ function IsVehicleEngineStarting(vehicle: integer): boolean end
 ---Example: `local data = LoadResourceFile("devtools", "data.json")`
 function LoadResourceFile(resourceName: string, fileName: string): string end
 
-function MumbleSetAudioInputIntent(intentHash: integer | string): () end
+function MumbleSetAudioInputIntent(intentHash: number | string): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x526FEE31)  
 ---Returns the owner ID of the specified entity.
-function NetworkGetEntityOwner(entity: integer): integer end
+function NetworkGetEntityOwner(entity: number): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xC795A4A9)  
@@ -627,23 +627,23 @@ function RegisterResourceAsEventHandler(eventName: string): () end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xEAC49841)  
 ---This native does not have an official description.
-function RemoveConvarChangeListener(cookie: integer): () end
+function RemoveConvarChangeListener(cookie: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xD36BE661)  
 ---**Experimental**: This native may be altered or removed in future versions of CitizenFX without warning.
 ---
 ---Removes a handler for changes to a state bag.
-function RemoveStateBagChangeHandler(cookie: integer): () end
+function RemoveStateBagChangeHandler(cookie: number): () end
 
-function SetAudioSubmixEffectRadioFx(submixId: integer, effectSlot: integer): () end
+function SetAudioSubmixEffectRadioFx(submixId: number, effectSlot: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xB3A4D128)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Sets whether the collision shape should detect a specific entity type.
-function SetColshapeEntityType(colShapeId: integer, entityType: integer, value: boolean): () end
+function SetColshapeEntityType(colShapeId: number, entityType: number, value: boolean): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x21C7A35B)  
@@ -663,29 +663,29 @@ function SetResourceKvpFloatNoSync(key: string, value: number): () end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x6A2B1E8)  
 ---A setter for [GET_RESOURCE_KVP_INT](#\_0x557B586A).
-function SetResourceKvpInt(key: string, value: integer): () end
+function SetResourceKvpInt(key: string, value: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x26AEB707)  
 ---Nonsynchronous [SET_RESOURCE_KVP_INT](#\_0x6A2B1E8) operation; see [FLUSH_RESOURCE_KVP](#\_0x5240DA5A).
-function SetResourceKvpIntNoSync(key: string, value: integer): () end
+function SetResourceKvpIntNoSync(key: string, value: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xCF9A2FF)  
 ---Nonsynchronous [SET_RESOURCE_KVP](#\_0x21C7A35B) operation; see [FLUSH_RESOURCE_KVP](#\_0x5240DA5A).
 function SetResourceKvpNoSync(key: string, value: string): () end
 
-function SetRoutingBucketEntityLockdownMode(bucketId: integer, mode: string): () end
+function SetRoutingBucketEntityLockdownMode(bucketId: number, mode: string): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x8D50E33A)  
 ---Internal function for setting a state bag value.
-function SetStateBagValue(bagName: string, keyName: string, valueData: string, valueLength: integer, replicated: boolean): () end
+function SetStateBagValue(bagName: string, keyName: string, valueData: string, valueLength: number, replicated: boolean): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0xDD379006)  
 ---This native does not have an official description.
-function StartFindKvp(prefix: string): integer end
+function StartFindKvp(prefix: string): number end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x12A330)  
@@ -695,14 +695,14 @@ function StateBagHasKey(bagName: string, key: string): boolean end
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x91310870)  
 ---The backing function for TriggerEvent.
-function TriggerEventInternal(eventName: string, eventPayload: string, payloadLength: integer): () end
+function TriggerEventInternal(eventName: string, eventPayload: string, payloadLength: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x9F73FDC)  
 ---> This native only works in FiveM for GTAV Enhanced.---
 ------
 ---Unregisters a command that was previously registered with `REGISTER_COMMAND`, using the command ID returned by that native.
-function UnregisterCommand(commandId: integer): () end
+function UnregisterCommand(commandId: number): () end
 
 ---**`CFX` `shared`**  
 ---[Native Documentation](https://docs.fivem.net/natives/?_0x58382A19)  
@@ -711,7 +711,7 @@ function WasEventCanceled(): boolean end
 
 function ActivateAudioSlowmoMode(mode: string): () end
 
-function OverrideVehHorn(vehicle: integer, override: boolean, hornHash: integer): () end
+function OverrideVehHorn(vehicle: number, override: boolean, hornHash: number): () end
 
 ---
 ---```
@@ -791,12 +791,12 @@ function SetAudioFlag(flagName: string, toggle: boolean): () end
 ---// 0x16B702A3
 ---// 0x41D72A2E
 ---```
-function SetFollowPedCamThisUpdate(camName: string, easeTime: integer): boolean end
+function SetFollowPedCamThisUpdate(camName: string, easeTime: number): boolean end
 
 ---@deprecated
-function SetFollowPedCamCutsceneChat(camName: string, easeTime: integer): boolean end
+function SetFollowPedCamCutsceneChat(camName: string, easeTime: number): boolean end
 
-function SetTableGamesCameraThisUpdate(hash: integer | string): boolean end
+function SetTableGamesCameraThisUpdate(hash: number | string): boolean end
 
 ---
 ---The moon phase can be disabled with [DISABLE_MOON_CYCLE_OVERRIDE](#\_0x2BF72AD5B41AA739)
@@ -805,32 +805,32 @@ function EnableMoonCycleOverride(phase: number): () end
 ---@deprecated
 function SetExtraTimecycleModifierStrength(phase: number): () end
 
-function SetBlipCategory(blip: integer, index: integer): () end
+function SetBlipCategory(blip: number, index: number): () end
 
 ---
 ---Anything higher than 10 seems to be exactly the same as 10.
 ---
 ---Rockstar seem to only use 0, 2, 3, 4, 5 and 8 in the decompiled scripts.
-function SetBlipDisplay(blip: integer, displayId: integer): () end
+function SetBlipDisplay(blip: number, displayId: number): () end
 
 ---
 ---These flags can be combined with the `|` operator.
-function NetworkAddPedToSynchronisedScene(ped: integer, netScene: integer, animDict: string, animClip: string, blendInSpeed: number, blendOutSpeed: number, syncedSceneFlags: integer, ragdollFlags: integer, moverBlendInDelta: number, ikFlags: integer): () end
+function NetworkAddPedToSynchronisedScene(ped: number, netScene: number, animDict: string, animClip: string, blendInSpeed: number, blendOutSpeed: number, syncedSceneFlags: number, ragdollFlags: number, moverBlendInDelta: number, ikFlags: number): () end
 
-function IsPedInjured(ped: integer): boolean end
+function IsPedInjured(ped: number): boolean end
 
 ---
 ---```
 ---NativeDB Introduced: v323
 ---```
-function SetPedPhonePaletteIdx(ped: integer, index: integer): () end
+function SetPedPhonePaletteIdx(ped: number, index: number): () end
 
-function SetVehicleNeonLightsColour(vehicle: integer, r: integer, g: integer, b: integer): () end
+function SetVehicleNeonLightsColour(vehicle: number, r: number, g: number, b: number): () end
 
 ---
 ---Tracks IDs `0` and `3` are the main tracks you find trains on during normal gameplay, all the others are used during missions and are not complete tracks.
-function SwitchTrainTrack(trackId: integer, state: boolean): () end
+function SwitchTrainTrack(trackId: number, state: boolean): () end
 
 ---
 ---Not specifying any bit will lead to the native *always* returning 'false', and for example specifying '4 | 2' will check for any weapon except fists and melee weapons.
-function IsPedArmed(ped: integer, typeFlags: integer): boolean end
+function IsPedArmed(ped: number, typeFlags: number): boolean end
