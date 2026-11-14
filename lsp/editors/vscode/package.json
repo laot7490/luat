@@ -1,6 +1,6 @@
 {
 	"name": "luat-language-server",
-	"displayName": "LuaT - Language Support",
+	"displayName": "LuaT - Language Server (Official)",
 	"description": "Language support for typed Lua targeting CfxLua.",
 	"icon": "images/logo.png",
 	"publisher": "luat",
