@@ -1,0 +1,74 @@
+# Definition sources
+## Lua standard library
+
+- Hand-maintained `lua-shared.d.luat` and `lua-server.d.luat`, based on the [Lua 5.4 manual](https://www.lua.org/manual/5.4/manual.html). Function summaries are adapted into concise editor help. Lua copyright © 1994–2026 Lua.org, PUC-Rio; the declarations retain this notice and the accompanying MIT permission terms below.
+- CfxLua runtime commit: `5412ed86f9eff1b81d2afb10cff85153b043d3b8`; [library loading and global replacements](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaScriptRuntime.cpp).
+- Embedded Lua commit: `4b086dc082da96a8e21aaa38ef7c0f4a7697f2a4`; [sandbox debug exports](https://github.com/citizenfx/lua/blob/4b086dc082da96a8e21aaa38ef7c0f4a7697f2a4/ldblib.c). Only getinfo, getmetatable, setmetatable, getupvalue and traceback are exposed.
+- Server io/os exports follow LuaIO.cpp and LuaOS.cpp in the same CfxLua commit. No package library, dofile, loadfile, io.input/output/read or os.exit; CfxLua replaces require and print.
+- [Sandbox restrictions](https://docs.fivem.net/docs/developers/sandbox/) are descriptions, not a claim that filesystem operations succeed. Additional supported io.readdir/os timing functions are included.
+- Scope: Lua standard APIs and the documented io/os additions; GLM extensions remain owned by the existing runtime declarations.
+- Approximation: dependent generic returns, iterator packs, format-dependent results and vararg return packs use any where the current declaration syntax cannot express them. No compiler type-system changes.
+- Inventory: every function line in both Lua declaration files is checked against the builtin index by Rust tests. Type aliases hold namespace constants and file/directory methods.
+
+## FiveM definitions
+
+- Repository: https://github.com/overextended/fivem-lls-addon
+- Commit: ef5f08e5e1d4a176586a5befbe0a9ff8400c58fc
+- Included paths: GTA V and shared CFX native declarations under `library/natives/GTAV` and `library/natives/CFX-NATIVE`; runtime types from the six listed `library/runtime/` sources.
+- Excluded paths: RedM natives, `library/runtime/manifest.lua`, and `library/runtime/luaglm.lua` (LuaT owns vector types).
+- Runtime context mapping: client-only `RegisterNUICallback`, `SendNUIMessage`, `TriggerServerEvent`, `TriggerLatentServerEvent`, and `LocalPlayer`; server-only `GetPlayerIdentifiers`, `GetPlayerTokens`, `PerformHttpRequest`, `PerformHttpRequestAwait`, `GetPlayers`, `TriggerClientEvent`, and `TriggerLatentClientEvent`; all other included runtime APIs are shared. This is based on the pinned source documentation and FiveM runtime behavior.
+- Explicit adaptation: `msgpack.extend_get` has no `@param ext_id` annotation upstream; it is typed as `number` based on `msgpack.settype` in the same pinned source and recorded in `conversion-report.json`.
+- License: MIT; see [LICENSE](LICENSE).
+- Lua NUI helper behavior: [FiveM scheduler](https://github.com/citizenfx/fivem/blob/master/data/shared/citizen/scripting/lua/scheduler.lua) defines `SendNUIMessage(message)` by calling `SendNuiMessage(json.encode(message))`. Both names are exposed; the raw native keeps its JSON string parameter.
+
+- `library/natives/CFX-NATIVE/CFX.lua`
+- `library/natives/GTAV/APP.lua`
+- `library/natives/GTAV/AUDIO.lua`
+- `library/natives/GTAV/BRAIN.lua`
+- `library/natives/GTAV/CAM.lua`
+- `library/natives/GTAV/CLOCK.lua`
+- `library/natives/GTAV/CUTSCENE.lua`
+- `library/natives/GTAV/DATAFILE.lua`
+- `library/natives/GTAV/DECORATOR.lua`
+- `library/natives/GTAV/DLC.lua`
+- `library/natives/GTAV/ENTITY.lua`
+- `library/natives/GTAV/EVENT.lua`
+- `library/natives/GTAV/FILES.lua`
+- `library/natives/GTAV/FIRE.lua`
+- `library/natives/GTAV/GRAPHICS.lua`
+- `library/natives/GTAV/HUD.lua`
+- `library/natives/GTAV/INTERIOR.lua`
+- `library/natives/GTAV/ITEMSET.lua`
+- `library/natives/GTAV/LOADINGSCREEN.lua`
+- `library/natives/GTAV/LOCALIZATION.lua`
+- `library/natives/GTAV/MISC.lua`
+- `library/natives/GTAV/MOBILE.lua`
+- `library/natives/GTAV/MONEY.lua`
+- `library/natives/GTAV/NETSHOPPING.lua`
+- `library/natives/GTAV/NETWORK.lua`
+- `library/natives/GTAV/OBJECT.lua`
+- `library/natives/GTAV/PAD.lua`
+- `library/natives/GTAV/PATHFIND.lua`
+- `library/natives/GTAV/PED.lua`
+- `library/natives/GTAV/PHYSICS.lua`
+- `library/natives/GTAV/PLAYER.lua`
+- `library/natives/GTAV/RECORDING.lua`
+- `library/natives/GTAV/REPLAY.lua`
+- `library/natives/GTAV/SAVEMIGRATION.lua`
+- `library/natives/GTAV/SCRIPT.lua`
+- `library/natives/GTAV/SHAPETEST.lua`
+- `library/natives/GTAV/SOCIALCLUB.lua`
+- `library/natives/GTAV/STATS.lua`
+- `library/natives/GTAV/STREAMING.lua`
+- `library/natives/GTAV/SYSTEM.lua`
+- `library/natives/GTAV/TASK.lua`
+- `library/natives/GTAV/VEHICLE.lua`
+- `library/natives/GTAV/WATER.lua`
+- `library/natives/GTAV/WEAPON.lua`
+- `library/natives/GTAV/ZONE.lua`
+- `library/runtime/citizen.lua`
+- `library/runtime/env.lua`
+- `library/runtime/event.lua`
+- `library/runtime/json.lua`
+- `library/runtime/msgpack.lua`
+- `library/runtime/promise.lua`

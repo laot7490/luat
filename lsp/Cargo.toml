@@ -1,0 +1,17 @@
+[package]
+name = "luat-lsp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "luat-lsp"
+path = "src/main.rs"
+
+[dependencies]
+luat = { path = ".." }
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync", "time"] }
+tower-lsp-server = "=0.23.0"
+
+[dev-dependencies]
+serde_json = "1"

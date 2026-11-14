@@ -1,0 +1,162 @@
+{
+	"name": "luat-vscode",
+	"displayName": "LuaT",
+	"description": "Language support for typed Lua targeting CfxLua.",
+	"icon": "images/logo.png",
+	"publisher": "luat",
+	"version": "0.1.0",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/laot7490/luat.git"
+	},
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"main": "./out/extension.js",
+	"files": [
+		"images/logo.png",
+		"out/extension.js",
+		"out/extension.js.map",
+		"node_modules/vscode-languageclient/**",
+		"node_modules/vscode-languageclient/node_modules/**",
+		"node_modules/semver/**",
+		"node_modules/vscode-languageserver-protocol/**",
+		"node_modules/vscode-jsonrpc/**",
+		"node_modules/vscode-languageserver-types/**",
+		"syntaxes/**",
+		"language-configuration.json",
+		"server/**",
+		"README.md",
+		"LICENSE"
+	],
+	"contributes": {
+		"languages": [
+			{
+				"id": "luat",
+				"aliases": [
+					"LuaT",
+					"luat"
+				],
+				"extensions": [
+					".luat",
+					".d.luat"
+				],
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "luat",
+				"scopeName": "source.luat",
+				"path": "./syntaxes/luat.tmLanguage.json"
+			}
+		],
+		"commands": [
+			{
+				"command": "luat.restartLanguageServer",
+				"title": "LuaT: Restart Language Server"
+			},
+			{
+				"command": "luat.showOutput",
+				"title": "LuaT: Show Language Server Output"
+			}
+		],
+		"configuration": {
+			"title": "LuaT",
+			"properties": {
+				"luat.server.path": {
+					"type": "string",
+					"default": "",
+					"scope": "machine",
+					"description": "Path to a luat-lsp executable; defaults to the server packaged for this platform."
+				},
+				"luat.diagnostics.unusedParameters": {
+					"type": "boolean",
+					"default": true,
+					"scope": "window",
+					"description": "Fade function parameters that are never read."
+				},
+				"luat.diagnostics.unusedLocals": {
+					"type": "boolean",
+					"default": true,
+					"scope": "window",
+					"description": "Fade local variables and functions that are never read."
+				},
+				"luat.inlayHints.parameterNames.enabled": {
+					"type": "boolean",
+					"default": false,
+					"scope": "window",
+					"description": "Show parameter names beside arguments of resolved calls."
+				},
+				"luat.inlayHints.variableTypes.enabled": {
+					"type": "boolean",
+					"default": false,
+					"scope": "window",
+					"description": "Show known inferred types beside local variables without a written type."
+				}
+			}
+		},
+		"semanticTokenScopes": [
+			{
+				"language": "luat",
+				"scopes": {
+					"variable.readonly": [
+						"variable.other.constant.luat"
+					],
+					"variable": [
+						"variable.other.readwrite.luat"
+					],
+					"parameter": [
+						"variable.parameter.luat"
+					],
+					"type": [
+						"entity.name.type.luat"
+					],
+					"function": [
+						"entity.name.function.luat"
+					],
+					"property": [
+						"variable.other.property.luat"
+					],
+					"operator": [
+						"keyword.operator.luat"
+					],
+					"type.defaultLibrary": [
+						"support.type.luat"
+					]
+				}
+			}
+		],
+		"configurationDefaults": {
+			"[luat]": {
+				"editor.semanticHighlighting.enabled": true
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p .",
+		"typecheck": "tsc --noEmit -p .",
+		"test": "tsc -p . && node ./out/test/runTest.js",
+		"package": "tsc -p . && vsce package"
+	},
+	"dependencies": {
+		"vscode-languageclient": "^9.0.1"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"@types/vscode": "^1.90.0",
+		"@types/mocha": "^10.0.10",
+		"mocha": "^10.8.2",
+		"@vscode/test-electron": "^2.4.1",
+		"@vscode/vsce": "^4.0.2",
+		"typescript": "^5.7.2"
+	},
+	"allowScripts": {
+		"@vscode/vsce-sign@2.1.1": true,
+		"keytar@7.9.0": true
+	}
+}

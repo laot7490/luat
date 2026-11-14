@@ -1,0 +1,386 @@
+-- Hand-maintained Lua 5.4 declarations adapted to pinned CfxLua; documentation summaries are adapted from the manual. Copyright © 1994–2026 Lua.org, PUC-Rio; see SOURCE.md.
+
+---Raises an error with `message` when `value` is false or nil; otherwise returns all arguments.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-assert)
+function assert(value: any, message: any?, ...: any): any end
+
+---Controls Lua garbage collection: use `collect`, `stop`, `restart`, `step`, or `count` to collect, pause, resume, advance, or inspect the collector. Other options tune its mode and parameters.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-collectgarbage)
+function collectgarbage(option: string?, argument: number?, ...: number): any end
+
+---Raises `message` as an error object. `level` controls which stack frame is reported; the function does not return.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-error)
+function error(message: any, level: integer?): never end
+
+---Returns an object’s metatable, or the `__metatable` protection value when one is set.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-getmetatable)
+function getmetatable(object: any): any end
+
+---Returns an iterator over consecutive integer keys starting at 1; iteration stops at the first absent value.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-ipairs)
+function ipairs(t: table): ((table, integer) -> any, table, integer) end
+
+---Compiles a string or reader function as a chunk and returns the function, or nil and an error message. `env` supplies its environment; CfxLua restricts available loading behavior.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-load)
+function load(chunk: string | (() -> string?), chunkname: string?, mode: string?, env: table?): (((...any) -> any)?, string?) end
+
+---Returns the next key and value in table `t` after `index`; pass nil to begin iteration. Do not add new keys during traversal.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-next)
+function next(t: table, index: any?): (any, any) end
+
+---Returns an iterator over a table. A table’s `__pairs` metamethod can customize the traversal.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-pairs)
+function pairs(t: table): ((table, any) -> any, table, any) end
+
+---Calls `f` in protected mode and returns a success boolean followed by its results or the error object.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-pcall)
+function pcall(f: (...any) -> any, ...: any): (boolean, any) end
+
+---Prints values to the FiveM console, using tostring for each value.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-print)
+function print(...: any): () end
+
+---Emits a warning message from the supplied string fragments. Warnings do not raise an error; CfxLua controls their destination.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-warn)
+function warn(message: string, ...: string): () end
+
+---Compares two values for primitive equality without invoking `__eq`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-rawequal)
+function rawequal(left: any, right: any): boolean end
+
+---Reads `t[index]` directly, bypassing the `__index` metamethod. `t` must be a table.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-rawget)
+function rawget(t: table, index: any): any end
+
+---Returns the raw length of a string or table without invoking `__len`; a table’s boundary is not necessarily unique when it has holes.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-rawlen)
+function rawlen(value: string | table): integer end
+
+---Writes `t[index] = value` directly, bypassing `__newindex`, and returns `t`. `t` must be a table; `index` cannot be nil or NaN.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-rawset)
+function rawset(t: table, index: any, value: any): table end
+
+---Returns arguments starting at the indexed position, or counts arguments when passed `#`. Negative indices count from the end.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-select)
+function select(index: integer | string, ...: any): any end
+
+---Sets a table’s metatable and returns the table. A protected `__metatable` field prevents changing it.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-setmetatable)
+function setmetatable(t: table, metatable: table?): table end
+
+---Converts a value to a number, or returns nil if conversion fails. When `base` is supplied, `value` must be a string representation in that base.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-tonumber)
+function tonumber(value: any, base: integer?): number? end
+
+---Converts a value to a string, using its `__tostring` metamethod when available.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-tostring)
+function tostring(value: any): string end
+
+---Returns one of Lua’s value-kind names: `nil`, `boolean`, `number`, `string`, `table`, `function`, `thread`, or `userdata`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-type)
+function type(value: any): string end
+
+---Calls `f` in protected mode and runs `handler` on errors before the stack unwinds. Returns a success boolean followed by results or the handled error.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-xpcall)
+function xpcall(f: (...any) -> any, handler: (any) -> any, ...: any): (boolean, any) end
+
+---Loads a CfxLua-supported module. This is not the unrestricted Lua package loader.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-require)
+function require(module: string): any end
+
+---Closes a suspended or dead coroutine and releases its stack. Returns whether it closed successfully and, on failure, the error object.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.close)
+function coroutine.close(co: thread): (boolean, any) end
+
+---Creates a suspended coroutine whose main function is `f`; it does not run the function until the coroutine is resumed.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.create)
+function coroutine.create(f: (...any) -> any): thread end
+
+---Reports whether the running coroutine can yield, optionally checking the supplied coroutine.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.isyieldable)
+function coroutine.isyieldable(co: thread?): boolean end
+
+---Starts or continues `co` with the supplied arguments. Returns `true` and yielded or returned values, or `false` and the error object.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.resume)
+function coroutine.resume(co: thread, ...: any): (boolean, any) end
+
+---Returns the running coroutine and a boolean indicating whether it is the main thread.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.running)
+function coroutine.running(): (thread, boolean) end
+
+---Returns `running`, `suspended`, `normal`, or `dead` for the coroutine.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.status)
+function coroutine.status(co: thread): string end
+
+---Creates a coroutine and returns a function that resumes it. The wrapper omits `resume`’s success flag and propagates errors.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.wrap)
+function coroutine.wrap(f: (...any) -> any): (...any) -> any end
+
+---Suspends the running coroutine and passes the supplied values to its resumer. Values supplied on the next resume become this call’s results.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-coroutine.yield)
+function coroutine.yield(...: any): any end
+
+---Returns the byte values from positions `i` through `j` of `s`; indices are one-based and may be negative. The result count depends on the selected range.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.byte)
+function string.byte(s: string, i: integer?, j: integer?): any end
+
+---Builds a string from integer byte values. Each value must fit in the byte range accepted by Lua.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.char)
+function string.char(...: integer): string end
+
+---Returns the binary representation of a Lua function.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.dump)
+function string.dump(f: (...any) -> any, strip: boolean?): string end
+
+---Searches `s` for `pattern` starting at `init`; returns start and end byte positions plus captures, or nil. Set `plain` to disable pattern syntax.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.find)
+function string.find(s: string, pattern: string, init: integer?, plain: boolean?): (integer?, integer?, any) end
+
+---Formats values using Lua’s format string rules, similar to `printf`; invalid format specifiers raise an error.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.format)
+function string.format(format: string, ...: any): string end
+
+---Returns an iterator that yields successive matches of `pattern` in `s`, including captures.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.gmatch)
+function string.gmatch(s: string, pattern: string, init: integer?): () -> any end
+
+---Returns a copy of `s` with matches of `pattern` replaced and the number of replacements. `n` limits replacements; `repl` may be a string, table, or function.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.gsub)
+function string.gsub(s: string, pattern: string, replacement: string | table | ((...any) -> any), n: integer?): (string, integer) end
+
+---Returns the byte length of `s`; use `utf8.len` when counting UTF-8 code points.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.len)
+function string.len(s: string): integer end
+
+---Returns a lowercase copy of `s` according to the current C locale.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.lower)
+function string.lower(s: string): string end
+
+---Returns the first match of `pattern` in `s` starting at `init`; returns captures when the pattern defines them, otherwise the whole match.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.match)
+function string.match(s: string, pattern: string, init: integer?): any end
+
+---Packs values into a binary string according to format `fmt` and returns it.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.pack)
+function string.pack(format: string, ...: any): string end
+
+---Returns the fixed size in bytes for format `fmt`; raises an error when the format has variable-sized fields.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.packsize)
+function string.packsize(format: string): integer end
+
+---Returns `s` repeated `n` times, with `sep` inserted between copies when provided.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.rep)
+function string.rep(s: string, n: integer, separator: string?): string end
+
+---Returns a copy of `s` with its bytes in reverse order.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.reverse)
+function string.reverse(s: string): string end
+
+---Returns the byte substring of `s` from `i` through `j`; indices are one-based and may be negative.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.sub)
+function string.sub(s: string, i: integer, j: integer?): string end
+
+---Unpacks values from binary string `s` using format `fmt` starting at `pos`; returns the values followed by the next unread position.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.unpack)
+function string.unpack(format: string, s: string, position: integer?): any end
+
+---Returns an uppercase copy of `s` according to the current C locale.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-string.upper)
+function string.upper(s: string): string end
+
+---Encodes the supplied Unicode code points as a UTF-8 string; invalid code points raise an error.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-utf8.char)
+function utf8.char(...: integer): string end
+
+---Returns an iterator over byte positions and Unicode code points in `s`; malformed UTF-8 raises an error.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-utf8.codes)
+function utf8.codes(s: string, lax: boolean?): (any, string, integer) end
+
+---Returns the code points in the byte range `i` through `j` of `s`; invalid UTF-8 raises an error unless the optional strictness behavior is disabled.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-utf8.codepoint)
+function utf8.codepoint(s: string, i: integer?, j: integer?, lax: boolean?): any end
+
+---Counts UTF-8 code points; returns nil and the invalid byte position for invalid input.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-utf8.len)
+function utf8.len(s: string, i: integer?, j: integer?, lax: boolean?): (integer?, integer?) end
+
+---Returns the byte position of the `n`th code point from byte position `i`; returns nil when the requested position is outside the string.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-utf8.offset)
+function utf8.offset(s: string, n: integer, i: integer?): integer? end
+
+---Concatenates list values from `i` through `j`, converting each to a string and inserting `sep` between them.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.concat)
+function table.concat(list: table, separator: string?, i: integer?, j: integer?): string end
+
+---Inserts `value` at position `pos` and shifts later elements, or appends it when `pos` is omitted.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.insert)
+function table.insert(list: table, value: any): () end
+
+---Inserts `value` at position `pos` and shifts later elements, or appends it when `pos` is omitted.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.insert)
+function table.insert(list: table, position: integer, value: any): () end
+
+---Copies list elements from source range `f` through `e` to `t`, supporting overlapping ranges. Writes to `dest` when supplied, otherwise to the source table.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.move)
+function table.move(source: table, first: integer, last: integer, target: integer, destination: table?): table end
+
+---Stores all arguments in a table and records their count in the `n` field, preserving trailing nil values.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.pack)
+function table.pack(...: any): table end
+
+---Removes and returns the element at `pos`, shifting later elements down; defaults to the last element.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.remove)
+function table.remove(list: table, position: integer?): any end
+
+---Sorts list elements in place, optionally using `comp` to order pairs. The comparator must define a consistent order.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.sort)
+function table.sort(list: table, compare: ((any, any) -> boolean)?): () end
+
+---Returns list elements from `i` through `j` as multiple results; very large ranges may exceed the runtime’s result limit.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-table.unpack)
+function table.unpack(list: table, i: integer?, j: integer?): any end
+
+---Returns the absolute value of `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.abs)
+function math.abs(x: number): number end
+
+---Returns the arc cosine of `x` in radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.acos)
+function math.acos(x: number): number end
+
+---Returns the arc sine of `x` in radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.asin)
+function math.asin(x: number): number end
+
+---Returns the arc tangent of `y`; when `x` is supplied, uses both coordinates to select the quadrant.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.atan)
+function math.atan(y: number, x: number?): number end
+
+---Returns the smallest integer not less than `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.ceil)
+function math.ceil(x: number): integer end
+
+---Returns the cosine of `x`, where `x` is in radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.cos)
+function math.cos(x: number): number end
+
+---Converts angle `x` from radians to degrees.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.deg)
+function math.deg(x: number): number end
+
+---Returns the value of e raised to `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.exp)
+function math.exp(x: number): number end
+
+---Returns the largest integer not greater than `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.floor)
+function math.floor(x: number): integer end
+
+---Returns the remainder of `x` divided by `y`, with the sign following `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.fmod)
+function math.fmod(x: number, y: number): number end
+
+---Returns the logarithm of `x`; the optional `base` defaults to e.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.log)
+function math.log(x: number, base: number?): number end
+
+---Returns the largest value among its arguments.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.max)
+function math.max(x: number, ...: number): number end
+
+---Returns the smallest value among its arguments.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.min)
+function math.min(x: number, ...: number): number end
+
+---Returns the integral part and fractional part of `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.modf)
+function math.modf(x: number): (integer, number) end
+
+---Converts angle `x` from degrees to radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.rad)
+function math.rad(x: number): number end
+
+---Returns a pseudo-random number. With integer bounds, returns an integer in the inclusive interval; without bounds, returns a real in [0, 1).
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.random)
+function math.random(): number end
+
+---Returns a pseudo-random number. With integer bounds, returns an integer in the inclusive interval; without bounds, returns a real in [0, 1).
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.random)
+function math.random(upper: integer): integer end
+
+---Returns a pseudo-random number. With integer bounds, returns an integer in the inclusive interval; without bounds, returns a real in [0, 1).
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.random)
+function math.random(lower: integer, upper: integer): integer end
+
+---Sets the pseudo-random generator seed and returns the resulting seed values.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.randomseed)
+function math.randomseed(x: integer?, y: integer?): (integer, integer) end
+
+---Returns the sine of `x`, where `x` is in radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.sin)
+function math.sin(x: number): number end
+
+---Returns the square root of `x`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.sqrt)
+function math.sqrt(x: number): number end
+
+---Returns the tangent of `x`, where `x` is in radians.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.tan)
+function math.tan(x: number): number end
+
+---Converts `x` to an integer when it has an exact integer representation; otherwise returns nil.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.tointeger)
+function math.tointeger(x: any): integer? end
+
+---Returns `integer` or `float` for a number, and nil for non-number values.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.type)
+function math.type(x: any): string? end
+
+---Compares integers `left` and `right` as unsigned values.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-math.ult)
+function math.ult(left: integer, right: integer): boolean end
+
+---Returns information about a function or stack level. The optional `what` string selects fields; this restricted CfxLua debug API exposes only supported runtime data.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.getinfo)
+function debug.getinfo(thread: thread, f: integer | ((...any) -> any), what: string?): table? end
+
+---Returns information about a function or stack level. The optional `what` string selects fields; this restricted CfxLua debug API exposes only supported runtime data.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.getinfo)
+function debug.getinfo(f: integer | ((...any) -> any), what: string?): table? end
+
+---Returns the actual metatable of `value`, including when ordinary `getmetatable` is protected.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.getmetatable)
+function debug.getmetatable(value: any): table? end
+
+---Sets the actual metatable of `value` and returns the value. This CfxLua debug API is restricted to the exposed operation.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.setmetatable)
+function debug.setmetatable(value: any, metatable: table?): any end
+
+---Returns the name and current value of the numbered upvalue of `f`, or no name when that index does not exist.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.getupvalue)
+function debug.getupvalue(f: (...any) -> any, upvalue: integer): (string?, any) end
+
+---Builds a stack traceback, optionally using a coroutine and message and skipping `level` frames. Availability follows CfxLua’s restricted debug API.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.traceback)
+function debug.traceback(message: any?, level: integer?): any end
+
+---Builds a stack traceback, optionally using a coroutine and message and skipping `level` frames. Availability follows CfxLua’s restricted debug API.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-debug.traceback)
+function debug.traceback(thread: thread, message: any?, level: integer?): any end
+
+typedef LuaMath = { huge: number, pi: number, maxinteger: integer, mininteger: integer }
+declare math: LuaMath
+
+declare string: table
+
+declare table: table
+
+declare coroutine: table
+
+typedef LuaUtf8 = { charpattern: string }
+declare utf8: LuaUtf8
+
+declare debug: table
+
+declare _G: table
+declare _VERSION: string

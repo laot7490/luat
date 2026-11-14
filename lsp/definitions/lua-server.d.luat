@@ -1,0 +1,107 @@
+-- Hand-maintained Lua 5.4 declarations adapted to pinned CfxLua; documentation summaries are adapted from the manual. Copyright © 1994–2026 Lua.org, PUC-Rio; see SOURCE.md.
+typedef LuaFile = { close: (self: LuaFile) -> (boolean?, string?, integer?), flush: (self: LuaFile) -> (boolean?, string?, integer?), lines: (self: LuaFile, ...any) -> (() -> any), read: (self: LuaFile, ...any) -> any, seek: (self: LuaFile, whence: string?, offset: integer?) -> integer?, setvbuf: (self: LuaFile, mode: string, size: integer?) -> boolean?, write: (self: LuaFile, ...any) -> any }
+typedef LuaDirectory = { close: (self: LuaDirectory) -> (), lines: (self: LuaDirectory) -> (() -> string?) }
+
+---Closes `file`, or the current output file when omitted. Returns success or nil with an error message and code.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.close)
+function io.close(file: LuaFile?): (boolean?, string?, integer?) end
+
+---Flushes the current output file so buffered data is written; returns success or nil with an error message and code.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.flush)
+function io.flush(): (boolean?, string?, integer?) end
+
+---Returns an iterator over lines in a file. When `filename` is supplied, opens it and closes it at end; otherwise reads the current input stream.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.lines)
+function io.lines(filename: string?, ...: any): (...any) -> any end
+
+---Opens a resource file. FiveM filesystem permissions and path restrictions apply.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.open)
+function io.open(filename: string, mode: string?): (LuaFile?, string?, integer?) end
+
+---Restricted to emulated directory listing commands by the FiveM sandbox.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.popen)
+function io.popen(command: string, mode: string?): (LuaFile?, string?, integer?) end
+
+---Blocked by the FiveM sandbox; returns a permission error.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.tmpfile)
+function io.tmpfile(): (LuaFile?, string?, integer?) end
+
+---Returns `file` for an open file handle, `closed file` for a closed handle, or nil for other values.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.type)
+function io.type(object: any): string? end
+
+---Writes string and number values to the current output file. Returns success or nil with an error message and code.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-io.write)
+function io.write(...: string | number): (LuaFile?, string?, integer?) end
+
+---Opens a directory for iteration and returns a directory handle, or nil with an error message and code. This is a CfxLua server extension.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaIO.cpp)
+function io.readdir(path: string): (LuaDirectory?, string?, integer?) end
+
+---Returns an approximation of CPU time used by the running process, in seconds.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.clock)
+function os.clock(): number end
+
+---Formats `time` as a string, or returns a date table when `format` is `*t`; omitted time means the current time.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.date)
+function os.date(format: string?, time: integer?): string | table end
+
+---Returns the number of seconds from time `t1` to time `t2`.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.difftime)
+function os.difftime(t2: integer, t1: integer): number end
+
+---Blocked by the FiveM sandbox; commands cannot be executed.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.execute)
+function os.execute(command: string?): (boolean?, string?, integer?) end
+
+---Limited by the FiveM sandbox; the os variable identifies Windows or Linux.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.getenv)
+function os.getenv(name: string): string? end
+
+---Creates a directory at `path`; returns success or nil with an error message and code. This is a CfxLua server extension.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp)
+function os.createdir(path: string): (boolean?, string?, integer?) end
+
+---Removes the file at `filename`; returns success or nil with an error message and code.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.remove)
+function os.remove(filename: string): (boolean?, string?, integer?) end
+
+---Renames or moves `oldname` to `newname`; returns success or nil with an error message and code.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.rename)
+function os.rename(oldname: string, newname: string): (boolean?, string?, integer?) end
+
+---Returns the current locale; changing the locale is blocked.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.setlocale)
+function os.setlocale(locale: string?, category: string?): string? end
+
+---Converts a date table to a timestamp, or returns the current time when no table is supplied.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.time)
+function os.time(date: table?): integer end
+
+---Returns a temporary file name. The name is not a guarantee that a file can be opened or that it remains reserved.
+---[Reference](https://www.lua.org/manual/5.4/manual.html#pdf-os.tmpname)
+function os.tmpname(): string end
+
+---Returns the absolute difference between two timestamps, as implemented by CfxLua.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp#L67-L91)
+function os.deltatime(): number end
+
+---Returns a high-resolution clock value from CfxLua.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp)
+function os.microtime(): number end
+
+---Returns a high-resolution clock value from CfxLua.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp)
+function os.nanotime(): number end
+
+---Returns the CfxLua runtime’s processor timestamp counter value.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp)
+function os.rdtsc(): number end
+
+---Returns the CfxLua runtime’s processor timestamp counter and auxiliary value.
+---[Pinned implementation](https://github.com/citizenfx/fivem/blob/5412ed86f9eff1b81d2afb10cff85153b043d3b8/code/components/citizen-scripting-lua/src/LuaOS.cpp)
+function os.rdtscp(): (number, number) end
+
+declare io: table
+
+declare os: table

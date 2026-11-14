@@ -1,0 +1,241 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "LuaT",
+	"scopeName": "source.luat",
+	"patterns": [
+		{
+			"include": "#function-signature"
+		},
+		{
+			"include": "#comments"
+		},
+		{
+			"include": "#strings"
+		},
+		{
+			"include": "#operators"
+		},
+		{
+			"include": "#constants"
+		},
+		{
+			"include": "#keywords"
+		},
+		{
+			"include": "#types"
+		},
+		{
+			"include": "#numbers"
+		}
+	],
+	"repository": {
+		"function-signature": {
+			"begin": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_.:]*)\\s*(\\()",
+			"beginCaptures": {
+				"1": {
+					"name": "keyword.control.luat"
+				},
+				"2": {
+					"name": "entity.name.function.luat"
+				},
+				"3": {
+					"name": "punctuation.section.parameters.begin.luat"
+				}
+			},
+			"end": "\\)",
+			"endCaptures": {
+				"0": {
+					"name": "punctuation.section.parameters.end.luat"
+				}
+			},
+			"patterns": [
+				{
+					"include": "#signature-parameters"
+				}
+			]
+		},
+		"signature-parameters": {
+			"patterns": [
+				{
+					"include": "#comments"
+				},
+				{
+					"include": "#strings"
+				},
+				{
+					"begin": "\\(",
+					"end": "\\)",
+					"patterns": [
+						{
+							"include": "#signature-parameters"
+						}
+					]
+				},
+				{
+					"match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\??\\s*:)",
+					"name": "variable.parameter.luat"
+				},
+				{
+					"include": "#types"
+				},
+				{
+					"include": "#keywords"
+				},
+				{
+					"match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+					"name": "entity.name.type.luat"
+				},
+				{
+					"include": "#operators"
+				}
+			]
+		},
+		"comments": {
+			"patterns": [
+				{
+					"name": "comment.line.documentation.luat",
+					"begin": "---(?=@)",
+					"end": "$",
+					"patterns": [
+						{
+							"match": "(@(?:param|field))\\s+([A-Za-z_][A-Za-z0-9_]*)",
+							"captures": {
+								"1": {
+									"name": "storage.type.annotation.luat"
+								},
+								"2": {
+									"name": "variable.parameter.luat"
+								}
+							}
+						},
+						{
+							"match": "@(?:return|deprecated)\\b",
+							"name": "storage.type.annotation.luat"
+						}
+					]
+				},
+				{
+					"name": "comment.block.long.luat",
+					"begin": "--\\[(=*)\\[",
+					"end": "\\]\\1\\]"
+				},
+				{
+					"name": "comment.line.double-dash.luat",
+					"match": "--.*$"
+				},
+				{
+					"name": "comment.line.double-slash.luat",
+					"match": "^\\s*//(?:\\s|$).*$"
+				},
+				{
+					"name": "comment.block.luat",
+					"begin": "/\\*",
+					"end": "\\*/"
+				}
+			]
+		},
+		"strings": {
+			"patterns": [
+				{
+					"name": "string.quoted.other.multiline.luat",
+					"begin": "\\[(=*)\\[",
+					"end": "\\]\\1\\]"
+				},
+				{
+					"name": "string.quoted.single.luat",
+					"begin": "'",
+					"end": "'",
+					"patterns": [
+						{
+							"name": "constant.character.escape.luat",
+							"match": "\\\\."
+						}
+					]
+				},
+				{
+					"name": "string.quoted.double.luat",
+					"begin": "\"",
+					"end": "\"",
+					"patterns": [
+						{
+							"name": "constant.character.escape.luat",
+							"match": "\\\\."
+						}
+					]
+				},
+				{
+					"name": "string.template.luat",
+					"begin": "`",
+					"end": "`",
+					"patterns": [
+						{
+							"name": "constant.character.escape.luat",
+							"match": "\\\\."
+						},
+						{
+							"name": "meta.interpolation.luat",
+							"begin": "\\{",
+						"end": "\\}",
+						"patterns": [
+							{ "include": "#comments" },
+							{ "include": "#strings" },
+							{ "include": "#operators" },
+							{ "include": "#keywords" },
+							{ "include": "#types" },
+							{ "include": "#numbers" }
+						]
+						}
+					]
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{
+					"name": "keyword.operator.luat",
+					"match": "(?:<<=|>>=|&=|\\|=|//=|\\.\\.=|\\+=|-=|\\*=|/=|%=|\\^=|~=|==|<=|>=|\\?\\?|\\?\\.|::|->|<<|>>|//|\\.\\.|[+*/%^#=<>~&|!:-])"
+				},
+				{
+					"name": "keyword.operator.luat",
+					"match": "\\b(and|or|not)\\b"
+				}
+			]
+		},
+		"constants": {
+			"patterns": [
+				{
+					"name": "keyword.declaration.constant.luat",
+					"match": "\\bconst\\b"
+				}
+			]
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"name": "keyword.control.luat",
+				"match": "\\b(break|do|else|elseif|end|false|for|function|goto|if|in|local|nil|repeat|return|then|true|until|while|continue|import|typedef|typeof|declare)\\b"
+				}
+			]
+		},
+		"types": {
+			"patterns": [
+				{
+					"name": "support.type.luat",
+					"match": "\\b(any|boolean|integer|never|number|string|table|thread|unknown|userdata|vector[234])\\b"
+				},
+				{
+					"name": "entity.name.function.luat",
+					"match": "(?<=function\\s+)[A-Za-z_][A-Za-z0-9_.]*"
+				}
+			]
+		},
+		"numbers": {
+			"patterns": [
+				{
+					"name": "constant.numeric.luat",
+					"match": "\\b0[xX][0-9A-Fa-f]+|\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b"
+				}
+			]
+		}
+	}
+}
