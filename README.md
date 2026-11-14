@@ -20,8 +20,7 @@
 - Provides commands to create a project, check it, build it, and rebuild it as you edit.
 
 > [!NOTE]
-
-- LuaT is in early development. You may encounter bugs or unexpected behavior. If you experience any issues, please [open an issue](https://github.com/laot7490/luat/issues) on GitHub.
+> LuaT is in early development. You may encounter bugs or unexpected behavior. If you experience any issues, please [open an issue](https://github.com/laot7490/luat/issues) on GitHub.
 
 ## Get started
 
