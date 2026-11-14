@@ -114,9 +114,11 @@ impl Backend {
             loop {
                 pending.notified().await;
                 if indexed {
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(150)) => break,
-                        _ = pending.notified() => {}
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(150)) => break,
+                            _ = pending.notified() => {}
+                        }
                     }
                 }
                 let _analysis = analysis.lock().await;

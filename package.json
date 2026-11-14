@@ -4,6 +4,7 @@
 	"scripts": {
 		"build": "npm run cli:build && npm run lsp:build",
 		"cli:build": "cargo install --path . --force",
+		"test": "cargo test --workspace --locked",
 		"lsp:build": "node scripts/build-lsp.mjs",
 		"prepare:major": "npm run prepare:cli:major && npm run prepare:lsp:major",
 		"prepare:minor": "npm run prepare:cli:minor && npm run prepare:lsp:minor",
