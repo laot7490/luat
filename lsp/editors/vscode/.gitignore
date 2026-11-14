@@ -5,4 +5,4 @@ out/
 out/
 server/
 *.vsix
-.vscode-tests
+.vscode-test/

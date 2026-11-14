@@ -14,7 +14,7 @@ function run(command, args, cwd, shell = false) {
   if (result.error || result.status !== 0) process.exit(result.status || 1);
 }
 
-for (const dependency of ['typescript/bin/tsc', '@vscode/vsce/vsce', 'vscode-languageclient/package.json']) {
+for (const dependency of ['typescript/bin/tsc', 'esbuild/bin/esbuild', '@vscode/vsce/vsce', 'vscode-languageclient/package.json']) {
   if (!existsSync(new URL(`node_modules/${dependency}`, extension))) {
     console.error('Missing extension dependencies. Run: npm --prefix lsp/editors/vscode ci');
     process.exit(1);
@@ -23,5 +23,5 @@ for (const dependency of ['typescript/bin/tsc', '@vscode/vsce/vsce', 'vscode-lan
 
 run('cargo', ['build', '--release', '-p', 'luat-lsp', '--locked'], root);
 
-run(process.execPath, [fileURLToPath(new URL('node_modules/typescript/bin/tsc', extension)), '-p', '.'], extension);
+run('npm', ['run', 'compile'], fileURLToPath(extension));
 await packageLsp(fileURLToPath(root), platform, fileURLToPath(new URL(`target/release/${executable}`, root)), fileURLToPath(new URL('target/release-assets/', root)));

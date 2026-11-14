@@ -21,12 +21,6 @@
 		"images/logo.png",
 		"out/extension.js",
 		"out/extension.js.map",
-		"node_modules/vscode-languageclient/**",
-		"node_modules/vscode-languageclient/node_modules/**",
-		"node_modules/semver/**",
-		"node_modules/vscode-languageserver-protocol/**",
-		"node_modules/vscode-jsonrpc/**",
-		"node_modules/vscode-languageserver-types/**",
 		"syntaxes/**",
 		"language-configuration.json",
 		"server/**",
@@ -138,21 +132,22 @@
 		}
 	},
 	"scripts": {
-		"compile": "tsc -p .",
+		"compile": "npm run typecheck && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=es2022 --sourcemap --external:vscode --outfile=out/extension.js",
 		"typecheck": "tsc --noEmit -p .",
-		"test": "tsc -p . && node ./out/test/runTest.js",
-		"package": "tsc -p . && vsce package"
+		"test": "tsc -p . && npm run compile && node ./out/test/runTest.js",
+		"package": "npm run compile && vsce package --no-dependencies"
 	},
 	"dependencies": {
 		"vscode-languageclient": "^9.0.1"
 	},
 	"devDependencies": {
+		"@types/mocha": "^10.0.10",
 		"@types/node": "^22.10.0",
 		"@types/vscode": "^1.90.0",
-		"@types/mocha": "^10.0.10",
-		"mocha": "^10.8.2",
 		"@vscode/test-electron": "^2.4.1",
 		"@vscode/vsce": "^4.0.2",
+		"esbuild": "^0.25.12",
+		"mocha": "^10.8.2",
 		"typescript": "^5.7.2"
 	},
 	"allowScripts": {
