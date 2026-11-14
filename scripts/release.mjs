@@ -56,7 +56,7 @@ export function resolveSource(product, tag, sourceSha, gitCommand = git) {
 	if (tagged && sourceSha && tagged !== sourceSha)
 		throw new Error(`${tag} points to a different commit; recover from the existing tag`);
 	const sha = validateSha(tagged ?? sourceSha);
-	gitCommand(["merge-base", "--is-ancestor", sha, "origin/master"]);
+	gitCommand(["merge-base", "--is-ancestor", sha, "origin/main"]);
 	return sha;
 }
 
@@ -109,7 +109,7 @@ function manifestAt(sha, product) {
 }
 
 async function resolve() {
-	if (process.env.GITHUB_REF !== "refs/heads/master") throw new Error("Run the release coordinator from master");
+	if (process.env.GITHUB_REF !== "refs/heads/main") throw new Error("Run the release coordinator from main");
 	const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
 	if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch") {
 		const { product, release_tag: tag } = event.inputs;
