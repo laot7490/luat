@@ -13,7 +13,7 @@ body = """
     {% for commit in entry.commits %}
         - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
             {% if commit.breaking %}[**breaking**] {% endif %}\
-            {{ commit.message | upper_first }}. ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/laot7490/luat/commit/{{ commit.id }}))\
+            {{ commit.message | upper_first }}. [{{ commit.id | truncate(length=7, end="") }}](https://github.com/laot7490/luat/commit/{{ commit.id }})\
     {% endfor %}
 {% endfor %}
 """
@@ -56,21 +56,26 @@ protect_breaking_commits = false
 # Assigns commits to groups.
 # Optionally sets the commit's scope and can decide to exclude commits from further processing.
 commit_parsers = [
-    { message = "^feat", group = "<!-- 0 -->Features" },
-    { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
-    { message = "^doc", group = "<!-- 3 -->Documentation" },
-    { message = "^perf", group = "<!-- 4 -->Performance" },
-    { message = "^refactor", group = "<!-- 2 -->Refactor" },
-    { message = "^style", group = "<!-- 5 -->Styling" },
-    { message = "^test", group = "<!-- 6 -->Testing" },
-    { message = "^chore\\(release\\): prepare for", skip = true },
-    { message = "^chore\\(deps.*\\)", skip = true },
-    { message = "^chore\\(pr\\)", skip = true },
-    { message = "^chore\\(pull\\)", skip = true },
-    { message = "^chore|^ci", group = "<!-- 7 -->Miscellaneous Tasks" },
-    { body = ".*security", group = "<!-- 8 -->Security" },
-    { message = "^revert", group = "<!-- 9 -->Revert" },
-    { message = ".*", group = "<!-- 10 -->Other" },
+    { message = "^feat(\\(.+\\))?!?:", group = "<!-- 0 -->Features" },
+    { message = "^fix(\\(.+\\))?!?:", group = "<!-- 1 -->Bug Fixes" },
+    { message = "^perf(\\(.+\\))?!?:", group = "<!-- 2 -->Performance" },
+    { message = "^refactor(\\(.+\\))?!?:", group = "<!-- 3 -->Refactoring" },
+    { message = "^docs?(\\(.+\\))?!?:", group = "<!-- 4 -->Documentation" },
+    { message = "^build(\\(.+\\))?!?:", group = "<!-- 5 -->Build System" },
+    { message = "^ci(\\(.+\\))?!?:", group = "<!-- 6 -->Continuous Integration" },
+    { message = "^test(\\(.+\\))?!?:", group = "<!-- 7 -->Testing" },
+    { message = "^style(\\(.+\\))?!?:", group = "<!-- 8 -->Styling" },
+    { message = "^revert(\\(.+\\))?!?:", group = "<!-- 9 -->Reverts" },
+
+    # Skip internal commits
+    { message = "^chore\\(release\\):", skip = true },
+    { message = "^chore\\(deps.*\\):", skip = true },
+    { message = "^chore\\(pr\\):", skip = true },
+    { message = "^chore\\(pull\\):", skip = true },
+
+    # Miscellaneous
+    { message = "^chore(\\(.+\\))?!?:", group = "<!-- 10 -->Maintenance" },
+    { message = ".*", group = "<!-- 11 -->Other Changes" },
 ]
 # Exclude commits that are not matched by any commit parser.
 filter_commits = false

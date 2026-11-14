@@ -276,7 +276,7 @@ async function publish(directory, product, tag, sha) {
 		const remoteTag = ghJson([`repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`], true);
 		if (!remoteTag) ghJson([`repos/${repository}/git/refs`, "--method", "POST", "-f", `ref=refs/tags/${tag}`, "-f", `sha=${sha}`]);
 		else resolveSource(product, tag, sha);
-		const title = `${product === "cli" ? "LuaT" : "LuaT Language Server"} ${tagVersion(product, tag)}`;
+		const title = `${product === "cli" ? "luat" : "luat-lsp"} ${tagVersion(product, tag)}`;
 		const body = `${await readFile(path.join(directory, "notes.md"), "utf8")}\n<!-- luat-release-run:${process.env.GITHUB_RUN_ID} -->\n`;
 		const notesFile = path.join(directory, "publish-notes.md");
 		await writeFile(notesFile, body);
