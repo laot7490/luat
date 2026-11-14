@@ -21,7 +21,7 @@ Language support for `.luat` and `.d.luat` files, powered by the LuaT language s
 
 Requires **VS Code 1.90 or later**.
 
-1. In VS Code, open Extensions and search for **LuaT** by `luat`, or install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=luat.luat-vscode).
+1. In VS Code, open Extensions and search for **LuaT** by `luat`, or install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=luat.luat-language-server).
 2. Open your resource folder and a `.luat` file.
 
 To install manually, download `luat-vscode-<platform>.vsix` from a [LuaT Language Server release](https://github.com/laot7490/luat/releases?q=lsp-v) tagged `lsp-v...`, then run **Extensions: Install from VSIX...** from the Command Palette.

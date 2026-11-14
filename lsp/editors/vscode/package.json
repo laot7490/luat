@@ -1,5 +1,5 @@
 {
-	"name": "luat-vscode",
+	"name": "luat-language-server",
 	"displayName": "LuaT Official Language Server",
 	"description": "Language support for typed Lua targeting CfxLua.",
 	"icon": "images/logo.png",
