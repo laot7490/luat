@@ -29,12 +29,12 @@ jobs:
       cli_tag: ${{ steps.resolve.outputs.cli_tag }}
       lsp_tag: ${{ steps.resolve.outputs.lsp_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
       - name: Resolve immutable source and release decisions
         id: resolve
         run: node scripts/release.mjs resolve

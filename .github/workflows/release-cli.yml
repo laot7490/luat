@@ -33,7 +33,7 @@ jobs:
           - { target: aarch64-apple-darwin, runner: macos-latest, platform: darwin-arm64, executable: luat }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
       - uses: dtolnay/rust-toolchain@stable
@@ -52,7 +52,7 @@ jobs:
         if: matrix.platform != 'linux-arm64'
         shell: bash
         run: target/${{ matrix.target }}/release/${{ matrix.executable }} --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cli-binary-${{ matrix.platform }}
           path: target/${{ matrix.target }}/release/${{ matrix.executable }}
@@ -64,20 +64,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.workflow_sha }}
           path: target/release-tools
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
       - uses: taiki-e/install-action@git-cliff
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: cli-binary-*
           path: target/release-binaries
@@ -108,7 +108,7 @@ jobs:
           node target/release-tools/scripts/release.mjs notes
           node target/release-tools/scripts/release.mjs manifest
           (cd target/release-prepared/assets && sha256sum --check SHA256SUMS)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: cli-prepared-${{ inputs.source_sha }}
           path: target/release-prepared/
@@ -128,21 +128,21 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.workflow_sha }}
           path: target/release-tools
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@11.6.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: cli-prepared-${{ inputs.source_sha }}
           path: target/release-prepared

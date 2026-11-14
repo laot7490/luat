@@ -33,7 +33,7 @@ jobs:
           - { target: aarch64-apple-darwin, runner: macos-latest, platform: darwin-arm64, executable: luat-lsp }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +51,7 @@ jobs:
       - name: Test native Language Server transport
         if: ${{ !matrix.cross }}
         run: cargo test -p luat-lsp --locked --test stdio --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: lsp-binary-${{ matrix.platform }}
           path: target/${{ matrix.target }}/release/${{ matrix.executable }}
@@ -63,18 +63,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.workflow_sha }}
           path: target/release-tools
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: lsp/editors/vscode/package-lock.json
       - uses: taiki-e/install-action@git-cliff
@@ -82,7 +82,7 @@ jobs:
         working-directory: lsp/editors/vscode
       - run: npm run compile
         working-directory: lsp/editors/vscode
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: lsp-binary-*
           path: target/release-binaries
@@ -103,7 +103,7 @@ jobs:
           node target/release-tools/scripts/release.mjs notes
           node target/release-tools/scripts/release.mjs manifest
           (cd target/release-prepared/assets && sha256sum --check SHA256SUMS)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: lsp-prepared-${{ inputs.source_sha }}
           path: target/release-prepared/
@@ -122,17 +122,17 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: lsp/editors/vscode/package-lock.json
       - run: npm ci
         working-directory: lsp/editors/vscode
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           name: lsp-prepared-${{ inputs.source_sha }}
           path: target/release-prepared
@@ -158,19 +158,19 @@ jobs:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.workflow_sha }}
           path: target/release-tools
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
-      - uses: actions/download-artifact@v4
+          node-version: 24
+      - uses: actions/download-artifact@v6
         with:
           name: lsp-prepared-${{ inputs.source_sha }}
           path: target/release-prepared
