@@ -12,10 +12,9 @@ fn temp_project() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::current_dir()
-        .unwrap()
-        .join("target")
-        .join(format!("luat-test-{}-{id}", std::process::id()))
+    let root = std::env::current_dir().unwrap().join("target/tests");
+    fs::create_dir_all(&root).unwrap();
+    root.join(format!("luat-test-{}-{id}", std::process::id()))
 }
 
 fn main_diagnostic(error: &BuildError) -> (&PathBuf, &Diagnostic) {
@@ -111,7 +110,7 @@ fn declaration_files_cannot_silently_drop_runtime_code() {
     fs::create_dir_all(root.join("types")).unwrap();
     fs::write(
         root.join("types/api.d.luat"),
-        "type PlayerId = number\nprint('oops')",
+        "typedef PlayerId = number\nprint('oops')",
     )
     .unwrap();
     fs::write(
@@ -121,8 +120,13 @@ fn declaration_files_cannot_silently_drop_runtime_code() {
     .unwrap();
     let project = Project::load(&root).unwrap();
     let error = project.check().unwrap_err();
-    assert!(error.to_string().contains("type declarations only"));
-    fs::write(root.join("types/api.d.luat"), "type PlayerId = number\n").unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("type declarations and empty function signatures only"),
+        "{error}"
+    );
+    fs::write(root.join("types/api.d.luat"), "typedef PlayerId = number\n").unwrap();
     assert!(project.check().is_ok());
     fs::remove_dir_all(root).unwrap();
 }
@@ -134,6 +138,192 @@ fn check_accepts_runtime_sources() {
     fs::write(root.join("src/client/main.luat"), "print('ready')").unwrap();
     fs::write(root.join("luat.toml"), "[project]\nname='test'\n").unwrap();
     assert!(Project::load(&root).unwrap().check().is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn client_context_rejects_server_only_natives() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::write(root.join("src/client/main.luat"), "MumbleCreateChannel(1)").unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+    )
+    .unwrap();
+
+    let error = Project::load(&root).unwrap().check().unwrap_err();
+    assert_eq!(main_diagnostic(&error).1.code, "LT2010");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_natives_are_filtered_by_execution_context() {
+    for (side, function) in [
+        (
+            "client",
+            "PerformHttpRequest('https://example.com', function() end)",
+        ),
+        ("server", "TriggerServerEvent('event')"),
+    ] {
+        let root = temp_project();
+        fs::create_dir_all(root.join(format!("src/{side}"))).unwrap();
+        fs::write(root.join(format!("src/{side}/main.luat")), function).unwrap();
+        fs::write(
+            root.join("luat.toml"),
+            format!("[project]\nname='test'\n[fivem]\n{side}=['src/{side}/main.luat']\n"),
+        )
+        .unwrap();
+
+        let error = Project::load(&root).unwrap().check().unwrap_err();
+        assert_eq!(main_diagnostic(&error).1.code, "LT2010", "{side}");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn same_native_name_keeps_its_context_specific_signature() {
+    for (side, source, succeeds) in [
+        ("client", "GetPlayerPed('12')", false),
+        ("server", "GetPlayerPed('12')", true),
+    ] {
+        let root = temp_project();
+        fs::create_dir_all(root.join(format!("src/{side}"))).unwrap();
+        fs::write(root.join(format!("src/{side}/main.luat")), source).unwrap();
+        fs::write(
+            root.join("luat.toml"),
+            format!("[project]\nname='test'\n[fivem]\n{side}=['src/{side}/main.luat']\n"),
+        )
+        .unwrap();
+
+        let result = Project::load(&root).unwrap().check();
+        assert_eq!(result.is_ok(), succeeds, "{side}: {result:?}");
+        if let Err(error) = result {
+            assert_eq!(main_diagnostic(&error).1.code, "LT2002");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn shared_natives_and_runtime_declarations_work_in_both_contexts() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+		root.join("src/shared/main.luat"),
+		"GetCurrentResourceName()\nCitizen.Wait(0)\njson.encode({ ready = true })\nexports('ready', function() end)",
+	)
+	.unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nshared=['src/shared/main.luat']\n",
+    )
+    .unwrap();
+
+    assert!(Project::load(&root).unwrap().check().is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn imports_propagate_both_execution_contexts_into_shared_modules() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/server")).unwrap();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/shared/resource.luat"),
+        "return GetCurrentResourceName()",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local resource = import('@/shared/resource')\nprint(resource)",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/server/main.luat"),
+        "local resource = import('@/shared/resource')\nprint(resource)",
+    )
+    .unwrap();
+    fs::write(
+		root.join("luat.toml"),
+		"[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\nserver=['src/server/main.luat']\n",
+	)
+	.unwrap();
+
+    assert!(Project::load(&root).unwrap().check().is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_check_uses_unsaved_imported_module_text_without_writing_it() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/shared/api.luat"),
+        "return { get = function(): string return 'ready' end }",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local api = import('@/shared/api')\nlocal value: string = api.get()",
+    )
+    .unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nclient=['src/client/main.luat']\n",
+    )
+    .unwrap();
+    let project = Project::load(&root).unwrap();
+    assert!(project.check().is_ok());
+
+    let overlay_path = root.join("src/shared/api.luat");
+    let overlays = std::collections::HashMap::from([(
+        overlay_path.clone(),
+        "return { get = function(): number return 1 end }".to_owned(),
+    )]);
+    let error = project.check_with_overlays(&overlays).unwrap_err();
+    assert_eq!(main_diagnostic(&error).1.code, "LT2001");
+    assert!(
+        fs::read_to_string(overlay_path)
+            .unwrap()
+            .contains("return 'ready'")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_check_uses_unsaved_declaration_text() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("types")).unwrap();
+    fs::write(
+        root.join("types/api.d.luat"),
+        "function getValue(): string end",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local value: string = getValue()",
+    )
+    .unwrap();
+    fs::write(
+		root.join("luat.toml"),
+		"[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n",
+	)
+	.unwrap();
+    let project = Project::load(&root).unwrap();
+    assert!(project.check().is_ok());
+
+    let path = root.join("types/api.d.luat");
+    let overlays = std::collections::HashMap::from([(
+        path.clone(),
+        "function getValue(): number end".to_owned(),
+    )]);
+    let error = project.check_with_overlays(&overlays).unwrap_err();
+    assert_eq!(main_diagnostic(&error).1.code, "LT2001");
+    assert!(fs::read_to_string(path).unwrap().contains(": string"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -207,7 +397,7 @@ fn checks_imported_table_function_and_reexport_signatures() {
         ),
         (
             "src/shared/api.luat",
-            "type Level = 'info' | 'warning'\nreturn { Print = function(status: Level, message: string) end }",
+            "typedef Level = 'info' | 'warning'\nreturn { Print = function(status: Level, message: string) end }",
         ),
         (
             "src/shared/api.luat",
@@ -269,7 +459,7 @@ fn checks_return_types_of_imported_function_fields() {
     fs::create_dir_all(root.join("src/shared")).unwrap();
     fs::write(
         root.join("src/shared/config.luat"),
-        "type Status = 'info'\nreturn { print = function(status: Status, message: string): boolean return true end }",
+        "typedef Status = 'info'\nreturn { print = function(status: Status, message: string): boolean return true end }",
     )
     .unwrap();
     let source =
@@ -304,12 +494,12 @@ fn resolves_exported_aliases_in_their_defining_module_and_keeps_import_runtime()
     fs::create_dir_all(root.join("src/shared")).unwrap();
     fs::write(
         root.join("src/shared/api.luat"),
-        "type Print = number\ntype Status = 'info' | 'warning'\ntype Message = { text: string }\ntype Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal api: Api<Message> = { Print = function(status: Status, message: Message) end }\nreturn api",
+        "typedef Print = number\ntypedef Status = 'info' | 'warning'\ntypedef Message = { text: string }\ntypedef Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal api: Api<Message> = { Print = function(status: Status, message: Message) end }\nreturn api",
     )
     .unwrap();
     fs::write(
         root.join("src/client/main.luat"),
-        "type Print = string\ntype Status = number\ntype Message = { other: number }\ntype Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal cfg = import('@/shared/api')\ncfg.Print('info', { text = 'ready' })",
+        "typedef Print = string\ntypedef Status = number\ntypedef Message = { other: number }\ntypedef Api<T> = { Print: (status: Status, message: T) -> nil }\nlocal cfg = import('@/shared/api')\ncfg.Print('info', { text = 'ready' })",
     )
     .unwrap();
     fs::write(

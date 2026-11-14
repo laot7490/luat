@@ -183,6 +183,7 @@ fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, time::SystemTime};
 
     #[test]
     fn parses_default_and_explicit_folder_with_spaces() {
@@ -201,8 +202,22 @@ mod tests {
 
     #[test]
     fn absolute_project_path_loads_without_canonicalization() {
-        let path = env::current_dir().unwrap().join("example");
-        assert!(Project::load(&path).is_ok());
+        let path = env::current_dir()
+            .unwrap()
+            .join("target/tests")
+            .join(format!(
+                "absolute project {} {}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(path.join("src")).unwrap();
+        fs::write(path.join("luat.toml"), "[project]\nname = 'test'\n").unwrap();
+        let result = Project::load(&path);
+        assert!(result.is_ok(), "{result:?}");
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

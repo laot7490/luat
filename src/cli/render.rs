@@ -274,7 +274,11 @@ mod tests {
 
         assert!(!rendered.contains("Cargo.toml:1:1"), "{rendered}");
         assert!(!rendered.contains("[package]"), "{rendered}");
-        assert!(rendered.contains("error LT9001"), "{rendered}");
+        assert!(
+            rendered.contains("Could not format generated CfxLua"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("LT9001"), "{rendered}");
     }
 
     #[test]

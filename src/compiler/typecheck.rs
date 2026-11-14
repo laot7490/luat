@@ -5,13 +5,17 @@ mod const_check;
 mod tests;
 mod values;
 
+use crate::compiler::declarations::{AliasCollector, DeclarationSet, TypeAlias};
 use aliases::*;
 use assignability::*;
 use const_check::ConstChecker;
 
 use values::ValuePack;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use full_moon::{
     LuaVersion,
@@ -25,17 +29,7 @@ use full_moon::{
 };
 
 use crate::compiler::syntax::PreparedSource;
-use crate::diagnostic::Diagnostic;
-
-struct AliasCollector {
-    aliases: HashMap<String, TypeAlias>,
-}
-
-#[derive(Clone)]
-struct TypeAlias {
-    parameters: Vec<String>,
-    definition: String,
-}
+use crate::{ExecutionContext, diagnostic::Diagnostic};
 
 struct TypeReferenceValidator<'a> {
     source: &'a str,
@@ -63,9 +57,7 @@ impl TypeReferenceValidator<'_> {
 
 impl Visitor for TypeReferenceValidator<'_> {
     fn visit_block(&mut self, node: &ast::Block) {
-        let mut collector = AliasCollector {
-            aliases: HashMap::new(),
-        };
+        let mut collector = AliasCollector::default();
         for statement in node.stmts() {
             match statement {
                 ast::Stmt::TypeDeclaration(declaration) => {
@@ -268,25 +260,6 @@ enum TypeMismatchKind {
 
 type ActualTableField = (String, String, String, usize, usize, usize);
 
-impl Visitor for AliasCollector {
-    fn visit_type_declaration(&mut self, node: &TypeDeclaration) {
-        let name = node.type_name().token().to_string();
-        let parameters = node
-            .generics()
-            .into_iter()
-            .flat_map(|generics| generics.generics().iter())
-            .map(|parameter| parameter.parameter().to_string().trim().to_owned())
-            .collect();
-        self.aliases.insert(
-            name,
-            TypeAlias {
-                parameters,
-                definition: strip_lua_comments(node.type_definition().to_string().trim()),
-            },
-        );
-    }
-}
-
 struct TypeChecker<'a> {
     source: &'a str,
     prepared: &'a PreparedSource,
@@ -294,6 +267,10 @@ struct TypeChecker<'a> {
     aliases: HashMap<String, TypeAlias>,
     alias_scope_changes: Vec<Vec<(String, Option<TypeAlias>)>>,
     functions: HashMap<String, FunctionSignature>,
+    declaration_functions: HashMap<String, Vec<FunctionSignature>>,
+    opposite_context_functions: HashSet<String>,
+    global_types: HashMap<String, String>,
+    execution_context: Option<ExecutionContext>,
     scopes: Vec<HashMap<String, String>>,
     block_scopes: Vec<bool>,
     repeat_scope_pending: usize,
@@ -306,7 +283,7 @@ struct TypeChecker<'a> {
 }
 
 #[derive(Clone)]
-struct FunctionSignature {
+pub(super) struct FunctionSignature {
     parameter_names: Vec<String>,
     parameters: Vec<String>,
     returns: ValuePack,
@@ -315,7 +292,7 @@ struct FunctionSignature {
 }
 
 impl FunctionSignature {
-    fn type_name(&self) -> String {
+    pub(super) fn type_name(&self) -> String {
         let parameters = self
             .parameters
             .iter()
@@ -328,7 +305,7 @@ impl FunctionSignature {
                         .map_or("parameter", String::as_str)
                 )
             })
-            .chain(self.vararg.iter().map(|ty| format!("...: {ty}")))
+            .chain(self.vararg.iter().map(|ty| format!("...{ty}")))
             .collect::<Vec<_>>()
             .join(", ");
         let generics = if self.generic_parameters.is_empty() {
@@ -347,8 +324,8 @@ struct GenericBindings {
 }
 
 #[derive(Default)]
-struct FunctionCollector {
-    functions: HashMap<String, FunctionSignature>,
+pub(super) struct FunctionCollector {
+    pub(super) functions: HashMap<String, FunctionSignature>,
 }
 
 #[derive(Default)]
@@ -390,7 +367,7 @@ impl FunctionCollector {
         }
     }
 
-    fn add_ast(&mut self, name: String, body: &ast::FunctionBody) {
+    pub(super) fn add_ast(&mut self, name: String, body: &ast::FunctionBody) {
         let name = name.trim().to_owned();
         if name.is_empty() {
             return;
@@ -645,6 +622,9 @@ impl TypeChecker<'_> {
         {
             return ty.clone();
         }
+        if let Some(ty) = self.global_types.get(expression) {
+            return ty.clone();
+        }
         if let Some((receiver, key)) = split_index_access(expression) {
             return self
                 .infer_index_type(receiver, key)
@@ -659,11 +639,11 @@ impl TypeChecker<'_> {
             && matching_delimiter(expression, open, '(', ')').is_some()
         {
             let name = expression[..open].trim();
-            if let Some(signature) = self.resolve_function_signature(name) {
-                let args = split_top_level(
-                    &expression[open + 1..matching_delimiter(expression, open, '(', ')').unwrap()],
-                    ',',
-                );
+            let args = split_top_level(
+                &expression[open + 1..matching_delimiter(expression, open, '(', ')').unwrap()],
+                ',',
+            );
+            if let Some(signature) = self.resolve_call_signature(name, &args) {
                 return infer_generic_return(&signature, &args, self);
             }
             return "any".to_owned();
@@ -679,17 +659,99 @@ impl TypeChecker<'_> {
         "any".to_owned()
     }
 
-    fn resolve_function_signature(&self, name: &str) -> Option<FunctionSignature> {
+    fn resolve_function_signatures(&self, name: &str) -> Vec<FunctionSignature> {
+        let scoped = self.scopes.iter().rev().find_map(|scope| scope.get(name));
+        if let Some(scoped) = scoped {
+            if let Some(signature) = self.functions.get(name) {
+                return vec![signature.clone()];
+            }
+            return parse_function_type(scoped).into_iter().collect();
+        }
         let field_access = split_known_field_access(name);
-        self.functions
-            .get(name)
+        if let Some(signature) = self.functions.get(name) {
+            return vec![signature.clone()];
+        }
+        if let Some(functions) = self.declaration_functions.get(name) {
+            return functions.clone();
+        }
+        if let Some(type_name) = self.global_types.get(name) {
+            return parse_function_signatures(type_name, &self.aliases);
+        }
+        if let Some(signature) = field_access
+            .and_then(|(receiver, field, _)| self.functions.get(&format!("{receiver}.{field}")))
+        {
+            return vec![signature.clone()];
+        }
+        parse_function_type(&self.infer_expression_type(name))
+            .into_iter()
+            .collect()
+    }
+
+    fn resolve_call_signature<T: AsRef<str>>(
+        &self,
+        name: &str,
+        arguments: &[T],
+    ) -> Option<FunctionSignature> {
+        let signatures = self.resolve_function_signatures(name);
+        signatures
+            .iter()
+            .find(|signature| self.signature_accepts_arguments(signature, arguments))
             .cloned()
-            .or_else(|| {
-                field_access.and_then(|(receiver, field, _)| {
-                    self.functions.get(&format!("{receiver}.{field}")).cloned()
-                })
+            .or_else(|| signatures.into_iter().next())
+    }
+
+    fn signature_accepts_arguments<T: AsRef<str>>(
+        &self,
+        signature: &FunctionSignature,
+        arguments: &[T],
+    ) -> bool {
+        if arguments.len() > signature.parameters.len() && signature.vararg.is_none() {
+            return false;
+        }
+        if arguments.len() < signature.parameters.len()
+            && signature.parameters[arguments.len()..]
+                .iter()
+                .any(|parameter| !is_optional_type(parameter, &self.aliases))
+        {
+            return false;
+        }
+        let argument_texts = arguments.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        let bindings = generic_bindings(signature, &argument_texts, self);
+        if !bindings.conflicts.is_empty() {
+            return false;
+        }
+        arguments
+            .iter()
+            .zip(&signature.parameters)
+            .all(|(argument, expected)| {
+                let mut expected = expected.clone();
+                for generic in &signature.generic_parameters {
+                    expected = substitute_type_name(
+                        &expected,
+                        generic,
+                        bindings.types.get(generic).map_or("any", String::as_str),
+                    );
+                }
+                is_assignable(
+                    &self.infer_expression_type(argument.as_ref()),
+                    &expected,
+                    &self.aliases,
+                    &mut Vec::new(),
+                ) != Some(false)
             })
-            .or_else(|| parse_function_type(&self.infer_expression_type(name)))
+            && arguments
+                .iter()
+                .skip(signature.parameters.len())
+                .all(|argument| {
+                    signature.vararg.as_ref().is_some_and(|expected| {
+                        is_assignable(
+                            &self.infer_expression_type(argument.as_ref()),
+                            expected,
+                            &self.aliases,
+                            &mut Vec::new(),
+                        ) != Some(false)
+                    })
+                })
     }
 
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
@@ -1116,9 +1178,7 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_type_declaration(&mut self, node: &TypeDeclaration) {
-        let mut collector = AliasCollector {
-            aliases: HashMap::new(),
-        };
+        let mut collector = AliasCollector::default();
         collector.visit_type_declaration(node);
         for (name, alias) in collector.aliases {
             let previous = self.aliases.insert(name.clone(), alias);
@@ -1511,7 +1571,7 @@ impl Visitor for TypeChecker<'_> {
 
     fn visit_function_call(&mut self, node: &ast::FunctionCall) {
         let suffixes = node.suffixes().collect::<Vec<_>>();
-        let Some((last, suffix)) = suffixes.iter().enumerate().last() else {
+        let Some((last, suffix)) = suffixes.iter().enumerate().next_back() else {
             return;
         };
         let mut name = node.prefix().to_string();
@@ -1556,7 +1616,7 @@ impl Visitor for TypeChecker<'_> {
             })
             .unwrap_or_default();
         let field_access = split_known_field_access(name);
-        let signature = self.resolve_function_signature(name);
+        let signature = self.resolve_call_signature(name, &args);
         if self
             .scopes
             .iter()
@@ -1581,6 +1641,26 @@ impl Visitor for TypeChecker<'_> {
                     ),
                 ));
             }
+            return;
+        }
+        if signature.is_none()
+            && let Some(context) = self.execution_context
+            && self.opposite_context_functions.contains(name)
+        {
+            let byte = node
+                .start_position()
+                .map(|position| position.bytes())
+                .unwrap_or_default();
+            self.diagnostics.push(Diagnostic::at(
+                self.source,
+                self.prepared.original_offset(byte),
+                name.chars().count().max(1),
+                "LT2010",
+                format!(
+                    "Native '{name}' is only available in the {} context.",
+                    context.opposite().as_str()
+                ),
+            ));
             return;
         }
         if let Some((receiver, field, _)) = field_access
@@ -2187,7 +2267,9 @@ fn parse_function_type(type_name: &str) -> Option<FunctionSignature> {
             .split_once(':')
             .map(|(name, ty)| (name.trim(), ty.trim()))
             .unwrap_or(("parameter", parameter));
-        if name == "..." {
+        if name == "..." || parameter.starts_with("...") {
+            let variadic = parameter.strip_prefix("...").unwrap_or(ty).trim();
+            let ty = variadic.strip_prefix(':').unwrap_or(variadic).trim();
             vararg = Some(ty.to_owned());
         } else {
             parameter_names.push(if name == "parameter" {
@@ -2205,6 +2287,17 @@ fn parse_function_type(type_name: &str) -> Option<FunctionSignature> {
         vararg,
         generic_parameters,
     })
+}
+
+fn parse_function_signatures(
+    type_name: &str,
+    aliases: &HashMap<String, TypeAlias>,
+) -> Vec<FunctionSignature> {
+    let resolved = resolve_alias_chain(type_name, aliases).unwrap_or_else(|| type_name.to_owned());
+    split_top_level(&resolved, '&')
+        .into_iter()
+        .filter_map(|signature| parse_function_type(strip_wrapping_parentheses(signature.trim())))
+        .collect()
 }
 
 fn split_index_access(expression: &str) -> Option<(&str, &str)> {
@@ -2966,7 +3059,7 @@ fn split_top_level(input: &str, separator: char) -> Vec<&str> {
     split_top_level_by(input, &[separator])
 }
 
-fn strip_lua_comments(input: &str) -> String {
+pub(super) fn strip_lua_comments(input: &str) -> String {
     let mut output = input.as_bytes().to_vec();
     let mut index = 0;
     let mut quote = None;
@@ -3049,7 +3142,8 @@ fn split_top_level_by<'a>(input: &'a str, separators: &[char]) -> Vec<&'a str> {
         match ch {
             '\'' | '"' => quote = Some(ch),
             '{' | '[' | '(' | '<' => depth += 1,
-            '}' | ']' | ')' | '>' => depth -= 1,
+            '}' | ']' | ')' => depth -= 1,
+            '>' if !input[..index].ends_with('-') => depth -= 1,
             _ if separators.contains(&ch) && depth == 0 => {
                 parts.push(input[start..index].trim());
                 start = end;
@@ -3296,15 +3390,20 @@ pub(crate) fn check(
     ast: &full_moon::ast::Ast,
     declarations: &[String],
 ) -> Vec<Diagnostic> {
-    check_with_imports(source, prepared, ast, declarations, None)
+    let declarations = match DeclarationSet::from_texts(declarations) {
+        Ok(declarations) => declarations,
+        Err(error) => return error.diagnostics,
+    };
+    check_with_imports(source, prepared, ast, &declarations, None, None)
 }
 
 pub(crate) fn check_with_imports(
     source: &str,
     prepared: &PreparedSource,
     ast: &full_moon::ast::Ast,
-    declarations: &[String],
+    declarations: &DeclarationSet,
     import_types: Option<&HashMap<String, String>>,
+    execution_context: Option<ExecutionContext>,
 ) -> Vec<Diagnostic> {
     let mut consts = ConstChecker {
         source,
@@ -3317,9 +3416,7 @@ pub(crate) fn check_with_imports(
     if !consts.diagnostics.is_empty() {
         return consts.diagnostics;
     }
-    let mut aliases = AliasCollector {
-        aliases: HashMap::new(),
-    };
+    let mut aliases = AliasCollector::default();
     aliases.aliases.insert(
         "vector2".to_owned(),
         TypeAlias {
@@ -3341,16 +3438,7 @@ pub(crate) fn check_with_imports(
             definition: "{ x: number, y: number, z: number, w: number }".to_owned(),
         },
     );
-    for declaration in declarations {
-        let prepared_declaration = crate::compiler::syntax::prepare(declaration);
-        let parsed = full_moon::parse_fallible(
-            &prepared_declaration.text,
-            full_moon::LuaVersion::cfxlua().with_luau(),
-        );
-        if parsed.errors().is_empty() {
-            aliases.visit_ast(&parsed.into_ast());
-        }
-    }
+    aliases.aliases.extend(declarations.aliases.clone());
     let checker_aliases = aliases.aliases.clone();
     aliases.visit_ast(ast);
 
@@ -3384,6 +3472,46 @@ pub(crate) fn check_with_imports(
             functions.visit_ast(ast);
             functions.functions
         },
+        declaration_functions: declarations
+            .functions
+            .iter()
+            .map(|(name, overloads)| {
+                (
+                    name.clone(),
+                    overloads
+                        .iter()
+                        .filter(|overload| {
+                            execution_context.is_none()
+                                || overload.context.is_none()
+                                || overload.context == execution_context
+                        })
+                        .map(|overload| overload.signature.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .filter(|(_, overloads)| !overloads.is_empty())
+            .collect(),
+        opposite_context_functions: execution_context.map_or_else(HashSet::new, |context| {
+            declarations
+                .functions
+                .iter()
+                .filter(|(_, overloads)| {
+                    overloads
+                        .iter()
+                        .any(|overload| overload.context == Some(context.opposite()))
+                        && !overloads.iter().any(|overload| {
+                            overload.context.is_none() || overload.context == Some(context)
+                        })
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        }),
+        global_types: declarations
+            .globals
+            .iter()
+            .map(|(name, global)| (name.clone(), global.type_name.clone()))
+            .collect(),
+        execution_context,
         scopes: vec![HashMap::new()],
         block_scopes: Vec::new(),
         repeat_scope_pending: 0,
@@ -3398,6 +3526,59 @@ pub(crate) fn check_with_imports(
     checker.diagnostics
 }
 
+pub(super) fn validate_declaration_types(
+    declarations: &DeclarationSet,
+) -> Result<(), (Option<PathBuf>, crate::CompileError)> {
+    let mut aliases = AliasCollector::default();
+    aliases.aliases.insert(
+        "vector2".to_owned(),
+        TypeAlias {
+            parameters: Vec::new(),
+            definition: "{ x: number, y: number }".to_owned(),
+        },
+    );
+    aliases.aliases.insert(
+        "vector3".to_owned(),
+        TypeAlias {
+            parameters: Vec::new(),
+            definition: "{ x: number, y: number, z: number }".to_owned(),
+        },
+    );
+    aliases.aliases.insert(
+        "vector4".to_owned(),
+        TypeAlias {
+            parameters: Vec::new(),
+            definition: "{ x: number, y: number, z: number, w: number }".to_owned(),
+        },
+    );
+    aliases.aliases.extend(declarations.aliases.clone());
+    let alias_graph = unguarded_alias_graph(&aliases.aliases);
+    let cycles = find_alias_cycles(&alias_graph);
+    let deep_aliases = find_deep_aliases(&alias_graph);
+    for file in &declarations.files {
+        let mut validator = TypeReferenceValidator {
+            source: &file.source,
+            prepared: &file.prepared,
+            alias_scopes: vec![aliases.aliases.clone()],
+            generic_scopes: Vec::new(),
+            cycles: cycles.clone(),
+            deep_aliases: deep_aliases.clone(),
+            reported_aliases: HashSet::new(),
+            diagnostics: Vec::new(),
+        };
+        validator.visit_ast(&file.ast);
+        if !validator.diagnostics.is_empty() {
+            return Err((
+                file.path.clone(),
+                crate::CompileError {
+                    diagnostics: validator.diagnostics,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn infer_module_export_type(
     source: &str,
     import_types: &HashMap<String, String>,
@@ -3408,9 +3589,7 @@ pub(crate) fn infer_module_export_type(
         return "any".to_owned();
     }
     let ast = parsed.into_ast();
-    let mut aliases = AliasCollector {
-        aliases: HashMap::new(),
-    };
+    let mut aliases = AliasCollector::default();
     aliases.visit_ast(&ast);
     let mut functions = FunctionCollector::default();
     functions.add_vector_constructors();
@@ -3422,6 +3601,10 @@ pub(crate) fn infer_module_export_type(
         aliases: aliases.aliases,
         alias_scope_changes: Vec::new(),
         functions: functions.functions,
+        declaration_functions: HashMap::new(),
+        opposite_context_functions: HashSet::new(),
+        global_types: HashMap::new(),
+        execution_context: None,
         scopes: vec![HashMap::new()],
         block_scopes: Vec::new(),
         repeat_scope_pending: 0,
@@ -3450,4 +3633,18 @@ pub(crate) fn infer_module_export_type(
         [single] => single.clone(),
         _ => types.join(" | "),
     }
+}
+
+// Share syntax-aware alias expansion with editor assistance.
+pub(crate) fn editor_resolve_alias(
+    ty: &str,
+    aliases: &HashMap<String, TypeAlias>,
+) -> Option<String> {
+    resolve_alias(ty, aliases)
+}
+pub(crate) fn editor_type_parts(ty: &str, separator: char) -> Vec<&str> {
+    split_top_level(ty, separator)
+}
+pub(crate) fn editor_type_fields(ty: &str) -> Vec<&str> {
+    split_top_level_by(ty, &[',', ';'])
 }

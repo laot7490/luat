@@ -16,16 +16,16 @@ fn rejects_undeclared_type_names() {
 #[test]
 fn rejects_undeclared_types_in_nested_annotations() {
     for source in [
-        "type Box = { value: Missing? }",
-        "type List<T> = { T }\nlocal values: List<Missing> = {}",
+        "typedef Box = { value: Missing? }",
+        "typedef List<T> = { T }\nlocal values: List<Missing> = {}",
         "local function take(value: Missing) end",
         "local function get(): Missing return nil end",
         "local value = {} :: Missing",
         "local value: Missing<number> = {}",
-        "type List<T> = { T }\nlocal value: T = 1",
+        "typedef List<T> = { T }\nlocal value: T = 1",
         "local function identity<T>(value: T): T return value end\nlocal value: T = 1",
-        "type Identity = <T>(T) -> T\nlocal value: T = 1",
-        "do type Hidden = number end\nlocal value: Hidden = 1",
+        "typedef Identity = <T>(T) -> T\nlocal value: T = 1",
+        "do typedef Hidden = number end\nlocal value: Hidden = 1",
     ] {
         let error = crate::compile_source(source).unwrap_err();
         assert!(
@@ -39,7 +39,7 @@ fn rejects_undeclared_types_in_nested_annotations() {
 
 #[test]
 fn type_alias_names_are_not_taken_from_comments() {
-    let source = "-- optional types = supported\ntype PlayerId = number\nlocal id: PlayerId = 1";
+    let source = "-- optional types = supported\ntypedef PlayerId = number\nlocal id: PlayerId = 1";
     assert!(crate::compile_source(source).is_ok());
     let invalid = source.replace("= 1", "= 'wrong'");
     let error = crate::compile_source(&invalid).unwrap_err();
@@ -49,25 +49,25 @@ fn type_alias_names_are_not_taken_from_comments() {
 #[test]
 fn accepts_declared_types_and_scoped_generic_parameters() {
     for source in [
-        "type Marker = { position: vector3, color: vector4? }\nlocal marker: Marker = { position = vector3(1, 2, 3) }",
-        "type List<T> = { T }\nlocal values: List<number> = { 1 }",
+        "typedef Marker = { position: vector3, color: vector4? }\nlocal marker: Marker = { position = vector3(1, 2, 3) }",
+        "typedef List<T> = { T }\nlocal values: List<number> = { 1 }",
         "local function identity<T>(value: T): T return value end",
-        "type Identity = <T>(T) -> T",
-        "type Node = { next: Node? }",
-        "type First = Second\ntype Second = number",
-        "do type Hidden = number\nlocal value: Hidden = 1 end",
-        "type Builtins = any | unknown | never | nil | boolean | number | integer | string | table | thread | userdata | buffer | vector2 | vector3 | vector4 | quaternion",
+        "typedef Identity = <T>(T) -> T",
+        "typedef Node = { next: Node? }",
+        "typedef First = Second\ntypedef Second = number",
+        "do typedef Hidden = number\nlocal value: Hidden = 1 end",
+        "typedef Builtins = any | unknown | never | nil | boolean | number | integer | string | table | thread | userdata | buffer | vector2 | vector3 | vector4 | quaternion",
     ] {
         assert!(crate::compile_source(source).is_ok(), "{source}");
     }
     let source = "local marker: Marker = {}";
-    let declarations = ["type Marker = { color: vector4? }".to_owned()];
+    let declarations = ["typedef Marker = { color: vector4? }".to_owned()];
     assert!(crate::compiler::compile_source_with_declarations(source, &declarations).is_ok());
 }
 
 #[test]
 fn record_error_highlights_invalid_job_value() {
-    let source = "type Job = 'police' | 'medic'\ntype Player = { id: number, name: string, job: Job? }\nlocal player: Player = { id = 42, name = 'Ada', job = 'sex' }";
+    let source = "typedef Job = 'police' | 'medic'\ntypedef Player = { id: number, name: string, job: Job? }\nlocal player: Player = { id = 42, name = 'Ada', job = 'sex' }";
     let error = crate::compile_source(source).unwrap_err();
     let diagnostic = &error.diagnostics[0];
     assert_eq!(&source[diagnostic.source_range.clone()], "'sex'");
@@ -79,7 +79,7 @@ fn record_error_highlights_invalid_job_value() {
 
 #[test]
 fn reports_missing_required_record_fields() {
-    let source = "type Job = 'police' | 'medic'\ntype Player = { id: number, name: string, job: Job }\nlocal player: Player = { id = 42, name = 'Ada' }";
+    let source = "typedef Job = 'police' | 'medic'\ntypedef Player = { id: number, name: string, job: Job }\nlocal player: Player = { id = 42, name = 'Ada' }";
     let error = crate::compile_source(source).unwrap_err();
     assert_eq!(error.diagnostics.len(), 1, "{error:?}");
     assert!(
@@ -93,7 +93,7 @@ fn reports_missing_required_record_fields() {
 
 #[test]
 fn checks_every_record_inside_a_generic_list() {
-    let source = "type Player = { id: number, callsign: string }\ntype List<T> = { T }\nlocal players: List<Player> = {{ id = 1, callsign = 'A-01' }, { id = 2 }}";
+    let source = "typedef Player = { id: number, callsign: string }\ntypedef List<T> = { T }\nlocal players: List<Player> = {{ id = 1, callsign = 'A-01' }, { id = 2 }}";
     let error = crate::compile_source(source).unwrap_err();
 
     assert_eq!(error.diagnostics.len(), 1, "{error:?}");
@@ -105,14 +105,14 @@ fn checks_every_record_inside_a_generic_list() {
             .is_ok()
     );
 
-    let nested = "type Player = { callsign: string }\ntype List<T> = { T }\ntype Box<T> = { value: T }\nlocal box: Box<List<Player> > = { value = { { callsign = 'A' }, { } } }";
+    let nested = "typedef Player = { callsign: string }\ntypedef List<T> = { T }\ntypedef Box<T> = { value: T }\nlocal box: Box<List<Player> > = { value = { { callsign = 'A' }, { } } }";
     let error = crate::compile_source(nested).unwrap_err();
     assert!(error.diagnostics[0].message.contains("value[2].callsign"));
 }
 
 #[test]
 fn checks_nested_recursive_records_inside_lists() {
-    let valid = "type Node = { value: string, next: Node? }\ntype List<T> = { T }\nlocal nodes: List<Node> = { { value = 'root', next = { value = 'leaf' } } }";
+    let valid = "typedef Node = { value: string, next: Node? }\ntypedef List<T> = { T }\nlocal nodes: List<Node> = { { value = 'root', next = { value = 'leaf' } } }";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid = valid.replace("value = 'leaf'", "value = 2");
@@ -122,7 +122,7 @@ fn checks_nested_recursive_records_inside_lists() {
 
 #[test]
 fn checks_generic_arrays_at_calls_returns_and_indexed_assignments() {
-    let source = "type Player = { name: string, callsign: string }\ntype List<T> = { T }\nlocal function take(players: List<Player>) end\ntake({ { name = 'Ada', callsign = 'A-01' }, { name = 'Linus' } })\nlocal function getPlayers(): List<Player>\n    return { { name = 'Grace' } }\nend\nlocal players: List<Player> = { { name = 'Ada', callsign = 'A-01' } }\nplayers[2] = { name = 'Linus' }";
+    let source = "typedef Player = { name: string, callsign: string }\ntypedef List<T> = { T }\nlocal function take(players: List<Player>) end\ntake({ { name = 'Ada', callsign = 'A-01' }, { name = 'Linus' } })\nlocal function getPlayers(): List<Player>\n    return { { name = 'Grace' } }\nend\nlocal players: List<Player> = { { name = 'Ada', callsign = 'A-01' } }\nplayers[2] = { name = 'Linus' }";
     let error = crate::compile_source(source).unwrap_err();
 
     assert_eq!(error.diagnostics.len(), 3, "{error:?}");
@@ -141,10 +141,12 @@ fn checks_generic_arrays_at_calls_returns_and_indexed_assignments() {
 #[test]
 fn checks_every_primitive_inside_a_generic_list() {
     assert!(
-        crate::compile_source("type List<T> = { T }\nlocal values: List<number> = { 1, 'wrong' }")
-            .is_err()
+        crate::compile_source(
+            "typedef List<T> = { T }\nlocal values: List<number> = { 1, 'wrong' }"
+        )
+        .is_err()
     );
-    let nested = "type List<T> = { T }\ntype Box<T> = { value: T }\nlocal value: Box<List<number> > = { value = { 1, 'wrong' } }";
+    let nested = "typedef List<T> = { T }\ntypedef Box<T> = { value: T }\nlocal value: Box<List<number> > = { value = { 1, 'wrong' } }";
     let error = crate::compile_source(nested).unwrap_err();
     assert!(error.diagnostics[0].message.contains("value[2]"));
 }
@@ -153,10 +155,10 @@ fn checks_every_primitive_inside_a_generic_list() {
 fn rejects_generic_aliases_with_the_wrong_number_of_arguments() {
     for (source, expected_range) in [
         (
-            "type List<T> = { T }\nlocal values: List<number, string> = {}",
+            "typedef List<T> = { T }\nlocal values: List<number, string> = {}",
             "List<number, string>",
         ),
-        ("type List<T> = { T }\nlocal values: List = {}", "List"),
+        ("typedef List<T> = { T }\nlocal values: List = {}", "List"),
     ] {
         let error = crate::compile_source(source).unwrap_err();
         assert_eq!(error.diagnostics[0].code, "LT2006");
@@ -169,7 +171,7 @@ fn rejects_generic_aliases_with_the_wrong_number_of_arguments() {
 
 #[test]
 fn rejects_unguarded_alias_cycles_but_accepts_recursive_records() {
-    let source = "type First = Second\ntype Second = First";
+    let source = "typedef First = Second\ntypedef Second = First";
     let error = crate::compile_source(source).unwrap_err();
     assert!(
         error
@@ -179,15 +181,15 @@ fn rejects_unguarded_alias_cycles_but_accepts_recursive_records() {
     );
 
     let recursive =
-        "type Node = { value: string, next: Node? }\nlocal root: Node = { value = 'root' }";
+        "typedef Node = { value: string, next: Node? }\nlocal root: Node = { value = 'root' }";
     assert!(crate::compile_source(recursive).is_ok());
 }
 
 #[test]
 fn rejects_alias_expansion_chains_over_128_levels() {
-    let mut source = "type A0 = number\n".to_owned();
+    let mut source = "typedef A0 = number\n".to_owned();
     for index in 1..=129 {
-        source.push_str(&format!("type A{index} = A{}\n", index - 1));
+        source.push_str(&format!("typedef A{index} = A{}\n", index - 1));
     }
 
     let error = crate::compile_source(&source).unwrap_err();
@@ -216,7 +218,7 @@ fn rejects_conflicting_generic_function_bindings() {
 
 #[test]
 fn binds_generic_list_and_box_parameters_from_known_values() {
-    let valid = "type Player = { name: string }\ntype List<T> = { T }\ntype Box<T> = { value: T }\nlocal function first<T>(items: List<T>): T\n    return items[1]\nend\nlocal players: List<Player> = { { name = 'Ada' } }\nlocal player: Player = first(players)\nlocal box: Box<Player> = { value = player }";
+    let valid = "typedef Player = { name: string }\ntypedef List<T> = { T }\ntypedef Box<T> = { value: T }\nlocal function first<T>(items: List<T>): T\n    return items[1]\nend\nlocal players: List<Player> = { { name = 'Ada' } }\nlocal player: Player = first(players)\nlocal box: Box<Player> = { value = player }";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid = valid.replace(
@@ -228,8 +230,7 @@ fn binds_generic_list_and_box_parameters_from_known_values() {
 
 #[test]
 fn reports_errors_from_each_if_expression_branch() {
-    let source =
-        "type List<T> = { T }\nlocal values: List<number> = if true then { 'bad' } else { false }";
+    let source = "typedef List<T> = { T }\nlocal values: List<number> = if true then { 'bad' } else { false }";
     let error = crate::compile_source(source).unwrap_err();
 
     assert_eq!(error.diagnostics.len(), 2, "{error:?}");
@@ -238,9 +239,9 @@ fn reports_errors_from_each_if_expression_branch() {
 #[test]
 fn checks_table_values_in_parenthesized_and_nested_if_expressions() {
     for source in [
-        "type Player = { callsign: string }\nlocal player: Player = (if true then {} else { callsign = 'ok' })",
-        "type Player = { callsign: string }\ntype List<T> = { T }\nlocal players: List<Player> = { if true then {} else { callsign = 'ok' } }",
-        "type Player = { callsign: string }\ntype Box<T> = { value: T }\nlocal box: Box<Player> = { value = if true then {} else { callsign = 'ok' } }",
+        "typedef Player = { callsign: string }\nlocal player: Player = (if true then {} else { callsign = 'ok' })",
+        "typedef Player = { callsign: string }\ntypedef List<T> = { T }\nlocal players: List<Player> = { if true then {} else { callsign = 'ok' } }",
+        "typedef Player = { callsign: string }\ntypedef Box<T> = { value: T }\nlocal box: Box<Player> = { value = if true then {} else { callsign = 'ok' } }",
     ] {
         let error = crate::compile_source(source).unwrap_err();
         assert!(
@@ -269,7 +270,7 @@ fn maps_if_branch_mismatches_after_templates_to_the_original_source() {
 
 #[test]
 fn validates_dictionary_values_without_treating_keys_as_record_fields() {
-    let valid = "type Dictionary<V> = { [string]: V }\nlocal values: Dictionary<number> = { good = 1, alsoGood = 2 }";
+    let valid = "typedef Dictionary<V> = { [string]: V }\nlocal values: Dictionary<number> = { good = 1, alsoGood = 2 }";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid = valid.replace("alsoGood = 2", "alsoGood = 'wrong'");
@@ -284,7 +285,7 @@ fn validates_dictionary_values_without_treating_keys_as_record_fields() {
 
 #[test]
 fn validates_dictionary_keys_and_mixed_record_indexers() {
-    let valid = "type Dictionary<K, V> = { [K]: V }\ntype PlayerMap = { [string]: number, count: number }\nlocal key: string = 'score'\nlocal values: Dictionary<string, number> = { score = 1, ['level'] = 2, [key] = 3 }\nlocal players: PlayerMap = { count = 2, extra = 3 }";
+    let valid = "typedef Dictionary<K, V> = { [K]: V }\ntypedef PlayerMap = { [string]: number, count: number }\nlocal key: string = 'score'\nlocal values: Dictionary<string, number> = { score = 1, ['level'] = 2, [key] = 3 }\nlocal players: PlayerMap = { count = 2, extra = 3 }";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid_key = valid.replace("score = 1", "[1] = 1");
@@ -293,17 +294,17 @@ fn validates_dictionary_keys_and_mixed_record_indexers() {
     let invalid_indexer_value = valid.replace("extra = 3", "extra = 'bad'");
     assert!(crate::compile_source(&invalid_indexer_value).is_err());
 
-    let mixed = "type Mixed = { name: string, [string]: number }\nlocal value: Mixed = { name = 'Ada', score = 2 }\nlocal name: string = value['name']\nlocal score: number = value['score']";
+    let mixed = "typedef Mixed = { name: string, [string]: number }\nlocal value: Mixed = { name = 'Ada', score = 2 }\nlocal name: string = value['name']\nlocal score: number = value['score']";
     assert!(crate::compile_source(mixed).is_ok());
 }
 
 #[test]
 fn resolves_union_typed_keys_for_record_reads_and_writes() {
-    let valid = "type Key = 'a' | 'b'\ntype Record = { a: string, b: string }\nlocal key: Key = 'a'\nlocal record: Record = { a = 'first', b = 'second' }\nlocal value: string = record[key]\nrecord[key] = 'updated'";
+    let valid = "typedef Key = 'a' | 'b'\ntypedef Record = { a: string, b: string }\nlocal key: Key = 'a'\nlocal record: Record = { a = 'first', b = 'second' }\nlocal value: string = record[key]\nrecord[key] = 'updated'";
     let result = crate::compile_source(valid);
     assert!(result.is_ok(), "{result:?}");
 
-    let mixed = "type Key = 'a' | 'b'\ntype Record = { a: string, b: number }\nlocal key: Key = 'a'\nlocal record: Record = { a = 'first', b = 2 }\nlocal value: string = record[key]";
+    let mixed = "typedef Key = 'a' | 'b'\ntypedef Record = { a: string, b: number }\nlocal key: Key = 'a'\nlocal record: Record = { a = 'first', b = 2 }\nlocal value: string = record[key]";
     assert!(crate::compile_source(mixed).is_err());
 
     let invalid_write = mixed.replace(
@@ -324,7 +325,7 @@ fn resolves_union_typed_keys_for_record_reads_and_writes() {
 
 #[test]
 fn resolves_optional_aliases_around_records() {
-    let valid = "type Player = { name: string }\ntype MaybePlayer = Player?\ntype MaybeUnionPlayer = Player | nil\ntype List<T> = { T }\ntype MaybeList = List<string>?\ntype MaybeUnionList = List<string> | nil\ntype Box = { item: MaybePlayer }\nlocal direct: MaybePlayer = { name = 'Ada' }\nlocal directName: string? = direct.name\nlocal unionPlayer: MaybeUnionPlayer = { name = 'Linus' }\nlocal unionName: string? = unionPlayer.name\nlocal list: MaybeList = { 'Ada' }\nlocal first: string? = list[1]\nlocal unionList: MaybeUnionList = { 'Linus' }\nlocal unionFirst: string? = unionList[1]\nlocal empty: Box = {}\nlocal filled: Box = { item = { name = 'Linus' } }";
+    let valid = "typedef Player = { name: string }\ntypedef MaybePlayer = Player?\ntypedef MaybeUnionPlayer = Player | nil\ntypedef List<T> = { T }\ntypedef MaybeList = List<string>?\ntypedef MaybeUnionList = List<string> | nil\ntypedef Box = { item: MaybePlayer }\nlocal direct: MaybePlayer = { name = 'Ada' }\nlocal directName: string? = direct.name\nlocal unionPlayer: MaybeUnionPlayer = { name = 'Linus' }\nlocal unionName: string? = unionPlayer.name\nlocal list: MaybeList = { 'Ada' }\nlocal first: string? = list[1]\nlocal unionList: MaybeUnionList = { 'Linus' }\nlocal unionFirst: string? = unionList[1]\nlocal empty: Box = {}\nlocal filled: Box = { item = { name = 'Linus' } }";
     let result = crate::compile_source(valid);
     assert!(result.is_ok(), "{result:?}");
 
@@ -345,7 +346,7 @@ fn allows_dynamic_record_keys_only_when_all_literal_keys_are_valid() {
         string_key_options("Key", &aliases),
         Some(vec!["a".to_owned(), "b".to_owned()])
     );
-    let valid = "type Key = 'a' | 'b'\ntype Record = { a: string, b: string }\nlocal key: Key = 'a'\nlocal value: Record = { a = 'first', b = 'second', [key] = 'third' }";
+    let valid = "typedef Key = 'a' | 'b'\ntypedef Record = { a: string, b: string }\nlocal key: Key = 'a'\nlocal value: Record = { a = 'first', b = 'second', [key] = 'third' }";
     let result = crate::compile_source(valid);
     assert!(result.is_ok(), "{result:?}");
 
@@ -363,29 +364,30 @@ fn allows_dynamic_record_keys_only_when_all_literal_keys_are_valid() {
 
 #[test]
 fn checks_every_array_entry_for_positional_and_explicit_indices() {
-    let source = "type List<T> = { T }\nlocal values: List<number> = { 'first', 2, [5] = 'last' }";
+    let source =
+        "typedef List<T> = { T }\nlocal values: List<number> = { 'first', 2, [5] = 'last' }";
     let error = crate::compile_source(source).unwrap_err();
     assert_eq!(error.diagnostics.len(), 2, "{error:?}");
     assert!(error.diagnostics[0].message.contains("[1]"));
     assert!(error.diagnostics[1].message.contains("[5]"));
 
-    let dictionary = "type Dictionary = { [number]: string }\nlocal values: Dictionary = { 'first', [4] = 'fourth' }";
+    let dictionary = "typedef Dictionary = { [number]: string }\nlocal values: Dictionary = { 'first', [4] = 'fourth' }";
     assert!(crate::compile_source(dictionary).is_ok());
 }
 
 #[test]
 fn optional_field_forms_accept_absence_and_check_present_values() {
     for source in [
-        "type Value = string?\ntype Record = { value: Value }\nlocal item: Record = {}",
-        "type Record = { value: string? }\nlocal item: Record = {}",
-        "type Record = { value: string | nil }\nlocal item: Record = {}",
-        "type Record = { value?: string }\nlocal item: Record = {}",
+        "typedef Value = string?\ntypedef Record = { value: Value }\nlocal item: Record = {}",
+        "typedef Record = { value: string? }\nlocal item: Record = {}",
+        "typedef Record = { value: string | nil }\nlocal item: Record = {}",
+        "typedef Record = { value?: string }\nlocal item: Record = {}",
     ] {
         assert!(crate::compile_source(source).is_ok(), "{source}");
     }
     for source in [
-        "type Record = { value?: string }\nlocal item: Record = { value = 1 }",
-        "type Record = { value: string? }\nlocal item: Record = { value = 1 }",
+        "typedef Record = { value?: string }\nlocal item: Record = { value = 1 }",
+        "typedef Record = { value: string? }\nlocal item: Record = { value = 1 }",
     ] {
         assert!(crate::compile_source(source).is_err(), "{source}");
     }
@@ -393,7 +395,7 @@ fn optional_field_forms_accept_absence_and_check_present_values() {
 
 #[test]
 fn checks_semicolon_separated_records_with_comments_and_trailing_separators() {
-    let valid = "type Player = { name: string, -- field\n level: number; }\nlocal player: Player = { name = 'Ada'; -- name\n level = 2; }";
+    let valid = "typedef Player = { name: string, -- field\n level: number; }\nlocal player: Player = { name = 'Ada'; -- name\n level = 2; }";
     let result = crate::compile_source(valid);
     assert!(result.is_ok(), "{result:?}");
 
@@ -404,7 +406,7 @@ fn checks_semicolon_separated_records_with_comments_and_trailing_separators() {
 
 #[test]
 fn keeps_escaped_quotes_and_commas_inside_table_string_values() {
-    let source = r#"type Message = { value: string, count: number }
+    let source = r#"typedef Message = { value: string, count: number }
 local message: Message = { value = "comma, escaped \"quote\"", count = 1, }"#;
     let result = crate::compile_source(source);
     assert!(result.is_ok(), "{result:?}");
@@ -415,17 +417,16 @@ local message: Message = { value = "comma, escaped \"quote\"", count = 1, }"#;
 
 #[test]
 fn uses_generic_array_element_types_for_index_reads_and_writes() {
-    let read =
-        "type List<T> = { T }\nlocal values: List<number> = { 1 }\nlocal label: string = values[1]";
+    let read = "typedef List<T> = { T }\nlocal values: List<number> = { 1 }\nlocal label: string = values[1]";
     assert!(crate::compile_source(read).is_err());
 
-    let write = "type List<T> = { T }\nlocal values: List<number> = { 1 }\nvalues[1] = 'wrong'";
+    let write = "typedef List<T> = { T }\nlocal values: List<number> = { 1 }\nvalues[1] = 'wrong'";
     assert!(crate::compile_source(write).is_err());
 }
 
 #[test]
 fn checks_table_values_against_a_complete_union_member() {
-    let invalid = "type A = { a: string, c: number }\ntype B = { b: number, d: string }\ntype Either = A | B | nil\nlocal value: Either = { a = 'ok', d = 'wrong' }";
+    let invalid = "typedef A = { a: string, c: number }\ntypedef B = { b: number, d: string }\ntypedef Either = A | B | nil\nlocal value: Either = { a = 'ok', d = 'wrong' }";
     assert!(crate::compile_source(invalid).is_err());
 
     let valid = invalid.replace("{ a = 'ok', d = 'wrong' }", "{ a = 'ok', c = 1 }");
@@ -440,7 +441,7 @@ fn accepts_quoted_bracket_keys_for_record_fields() {
         ("[\"name\"]", "[\"name\"]"),
     ] {
         let source = format!(
-            "type Player = {{ name: string }}\nlocal player: Player = {{ {key} = 'Ada' }}\nlocal name: string = player{access}"
+            "typedef Player = {{ name: string }}\nlocal player: Player = {{ {key} = 'Ada' }}\nlocal name: string = player{access}"
         );
         assert!(crate::compile_source(&source).is_ok(), "{source}");
     }
@@ -449,7 +450,7 @@ fn accepts_quoted_bracket_keys_for_record_fields() {
 #[test]
 fn highlights_multibyte_values_with_byte_safe_source_ranges() {
     let source =
-        "type Player = { callsign: number }\nlocal player: Player = { callsign = 'Çağrı' }";
+        "typedef Player = { callsign: number }\nlocal player: Player = { callsign = 'Çağrı' }";
     let error = crate::compile_source(source).unwrap_err();
     let diagnostic = &error.diagnostics[0];
 
@@ -459,7 +460,7 @@ fn highlights_multibyte_values_with_byte_safe_source_ranges() {
 
 #[test]
 fn merges_intersection_fields_before_checking_extra_fields() {
-    let source = "type A = { a: string }\ntype B = { b: number }\ntype Both = A & B\nlocal value: Both = { a = 'ok' }";
+    let source = "typedef A = { a: string }\ntypedef B = { b: number }\ntypedef Both = A & B\nlocal value: Both = { a = 'ok' }";
     let error = crate::compile_source(source).unwrap_err();
     assert!(
         error
@@ -474,8 +475,7 @@ fn merges_intersection_fields_before_checking_extra_fields() {
 
 #[test]
 fn resolves_optional_aliases_when_checking_missing_fields() {
-    let valid =
-        "type MaybeName = string?\ntype Player = { name: MaybeName }\nlocal player: Player = {}";
+    let valid = "typedef MaybeName = string?\ntypedef Player = { name: MaybeName }\nlocal player: Player = {}";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid = valid.replace(
@@ -487,22 +487,22 @@ fn resolves_optional_aliases_when_checking_missing_fields() {
 
 #[test]
 fn checks_structural_compatibility_between_typed_records() {
-    let valid = "type First = { name: string }\ntype Second = { name: string }\nlocal first: First = { name = 'Ada' }\nlocal second: Second = first";
+    let valid = "typedef First = { name: string }\ntypedef Second = { name: string }\nlocal first: First = { name = 'Ada' }\nlocal second: Second = first";
     assert!(crate::compile_source(valid).is_ok());
 
     let invalid = valid.replace(
-        "type Second = { name: string }",
-        "type Second = { name: number }",
+        "typedef Second = { name: string }",
+        "typedef Second = { name: number }",
     );
     assert!(crate::compile_source(&invalid).is_err());
 
-    let parenthesized = "type First = { name: string }\nlocal first: First = ({ name = 'Ada' })";
+    let parenthesized = "typedef First = { name: string }\nlocal first: First = ({ name = 'Ada' })";
     assert!(crate::compile_source(parenthesized).is_ok());
 }
 
 #[test]
 fn resolves_alias_chains_for_record_access_and_intersections() {
-    let source = "type Player = { name: string }\ntype PlayerAlias = Player\ntype PlayerAlias2 = PlayerAlias\nlocal player: PlayerAlias2 = { name = 'Ada' }\nlocal name: string = player.name";
+    let source = "typedef Player = { name: string }\ntypedef PlayerAlias = Player\ntypedef PlayerAlias2 = PlayerAlias\nlocal player: PlayerAlias2 = { name = 'Ada' }\nlocal name: string = player.name";
     let result = crate::compile_source(source);
     assert!(result.is_ok(), "{result:?}");
 
@@ -518,7 +518,7 @@ fn resolves_alias_chains_for_record_access_and_intersections() {
             .any(|diagnostic| diagnostic.code == "LT2005")
     );
 
-    let intersection = "type A = { a: string }\ntype AAlias = A\ntype B = { b: number }\ntype Both = AAlias & B\nlocal both: Both = { a = 'ok', b = 2 }";
+    let intersection = "typedef A = { a: string }\ntypedef AAlias = A\ntypedef B = { b: number }\ntypedef Both = AAlias & B\nlocal both: Both = { a = 'ok', b = 2 }";
     let result = crate::compile_source(intersection);
     assert!(result.is_ok(), "{result:?}");
 }
@@ -534,7 +534,7 @@ fn preserves_record_shapes_through_unannotated_locals() {
 
 #[test]
 fn reports_all_record_problems_in_type_declaration_order() {
-    let source = "type Player = { id: number, name: string, job: string }\nlocal player: Player = { id = 'bad', name = 3, foo = true }";
+    let source = "typedef Player = { id: number, name: string, job: string }\nlocal player: Player = { id = 'bad', name = 3, foo = true }";
     let error = crate::compile_source(source).unwrap_err();
     assert_eq!(error.diagnostics.len(), 4, "{error:?}");
     assert!(error.diagnostics[0].message.contains("Field 'id'"));
@@ -551,7 +551,7 @@ fn reports_all_record_problems_in_type_declaration_order() {
 
 #[test]
 fn reports_nested_missing_record_paths() {
-    let source = "type Job = 'police' | 'medic'\ntype Player = { profile: { job: Job } }\nlocal player: Player = { profile = {} }";
+    let source = "typedef Job = 'police' | 'medic'\ntypedef Player = { profile: { job: Job } }\nlocal player: Player = { profile = {} }";
     let error = crate::compile_source(source).unwrap_err();
     assert_eq!(error.diagnostics.len(), 1, "{error:?}");
     assert!(error.diagnostics[0].message.contains("profile.job"));
@@ -610,7 +610,7 @@ fn checks_vector_constructor_dimensions_arguments_and_record_shapes() {
     }
     assert!(crate::compile_source("local p: vector3 = vector4(1, 2, 3, 4)").is_err());
     assert!(
-        crate::compile_source("type Point = vector3\nlocal p: Point = vector4(1, 2, 3, 4)")
+        crate::compile_source("typedef Point = vector3\nlocal p: Point = vector4(1, 2, 3, 4)")
             .is_err()
     );
     assert!(crate::compile_source("local p: vector3 = vector3(1, 'x', 3)").is_err());
@@ -624,18 +624,22 @@ fn checks_vector_constructor_dimensions_arguments_and_record_shapes() {
             .is_err()
     );
     assert!(
-        crate::compile_source("type P = { coords?: vector3 }\nlocal p: P = {}\np = {coords = nil}")
-            .is_ok()
-    );
-    assert!(
         crate::compile_source(
-            "type P = { coords?: vector3 }\nlocal p: P = {coords = {x=1, y=2, z=3}}"
+            "typedef P = { coords?: vector3 }\nlocal p: P = {}\np = {coords = nil}"
         )
         .is_ok()
     );
     assert!(
-        crate::compile_source("type P = { coords?: vector3 }\nlocal p: P = {coords = {x=1, y=2}}")
-            .is_err()
+        crate::compile_source(
+            "typedef P = { coords?: vector3 }\nlocal p: P = {coords = {x=1, y=2, z=3}}"
+        )
+        .is_ok()
+    );
+    assert!(
+        crate::compile_source(
+            "typedef P = { coords?: vector3 }\nlocal p: P = {coords = {x=1, y=2}}"
+        )
+        .is_err()
     );
 }
 
@@ -658,47 +662,49 @@ fn rejects_decimal_vector_dimension_mismatches() {
 #[test]
 fn reports_missing_record_fields_in_expression_contexts() {
     let errors = crate::compile_source(
-            "type Player = { name: string }\ntype List<T> = { T }\nlocal player: Player = { name = 'Ada' }\nlocal players: List<Player> = { player }\nlocal first: Player = players[1]\nlocal firstName: string = first.ax ?? 'Unknown'",
+            "typedef Player = { name: string }\ntypedef List<T> = { T }\nlocal player: Player = { name = 'Ada' }\nlocal players: List<Player> = { player }\nlocal first: Player = players[1]\nlocal firstName: string = first.ax ?? 'Unknown'",
         )
         .unwrap_err();
     assert_eq!(errors.diagnostics.len(), 1, "{errors}");
     assert_eq!(errors.diagnostics[0].code, "LT2005");
     assert_eq!(
-        &"type Player = { name: string }\ntype List<T> = { T }\nlocal player: Player = { name = 'Ada' }\nlocal players: List<Player> = { player }\nlocal first: Player = players[1]\nlocal firstName: string = first.ax ?? 'Unknown'"
+        &"typedef Player = { name: string }\ntypedef List<T> = { T }\nlocal player: Player = { name = 'Ada' }\nlocal players: List<Player> = { player }\nlocal first: Player = players[1]\nlocal firstName: string = first.ax ?? 'Unknown'"
             [errors.diagnostics[0].source_range.clone()],
         "ax"
     );
     for source in [
-        "type P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = p.ax",
-        "type P = { name: string }\nlocal p: P = { name = 'Ada' }\np.ax = 'x'",
-        "type P = { name: string }\nlocal function f(p: P): string return p.ax end",
-        "type P = { name: string }\nlocal function f(value: string) end\nlocal p: P = { name = 'Ada' }\nf(p.ax)",
-        "type P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = { value = p.ax }",
-        "type P = { nested: P }\nlocal p: P = { nested = { nested = { nested = nil } } }\nlocal x = p.nested.ax",
+        "typedef P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = p.ax",
+        "typedef P = { name: string }\nlocal p: P = { name = 'Ada' }\np.ax = 'x'",
+        "typedef P = { name: string }\nlocal function f(p: P): string return p.ax end",
+        "typedef P = { name: string }\nlocal function f(value: string) end\nlocal p: P = { name = 'Ada' }\nf(p.ax)",
+        "typedef P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = { value = p.ax }",
+        "typedef P = { nested: P }\nlocal p: P = { nested = { nested = { nested = nil } } }\nlocal x = p.nested.ax",
     ] {
         assert!(crate::compile_source(source).is_err(), "{source}");
     }
     for source in [
-        "type P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = p.name",
-        "type P = { name?: string }\nlocal p: P? = nil\nlocal x = p?.name",
-        "type P = { name: string }\nlocal p: P? = nil\nlocal x = p?.name",
-        "type Box<T> = { value: T }\nlocal box: Box<string> = { value = 'ok' }\nlocal x = box.value",
+        "typedef P = { name: string }\nlocal p: P = { name = 'Ada' }\nlocal x = p.name",
+        "typedef P = { name?: string }\nlocal p: P? = nil\nlocal x = p?.name",
+        "typedef P = { name: string }\nlocal p: P? = nil\nlocal x = p?.name",
+        "typedef Box<T> = { value: T }\nlocal box: Box<string> = { value = 'ok' }\nlocal x = box.value",
         "local x = external.value",
         "local x = false ?? true",
     ] {
         assert!(crate::compile_source(source).is_ok(), "{source}");
     }
     assert!(
-        crate::compile_source("type P = { name: string }\nlocal p: P? = nil\nlocal x = p?.missing")
-            .unwrap_err()
-            .to_string()
-            .contains("LT2005")
+        crate::compile_source(
+            "typedef P = { name: string }\nlocal p: P? = nil\nlocal x = p?.missing"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("LT2005")
     );
 }
 
 #[test]
 fn record_field_errors_keep_boundary_codes_and_value_ranges() {
-    let declarations = "type Job = 'police' | 'medic'\ntype Player = { job: Job? }\n";
+    let declarations = "typedef Job = 'police' | 'medic'\ntypedef Player = { job: Job? }\n";
     for (body, code) in [
         ("local p: Player = { job = 'sex' }", "LT2001"),
         ("local p: Player = {}\np = { job = 'sex' }", "LT2001"),
@@ -724,25 +730,28 @@ fn record_field_errors_keep_boundary_codes_and_value_ranges() {
 
 #[test]
 fn reports_only_provable_primitive_mismatches() {
-    let source = "type Count = number\nlocal count: Count = 'many'";
+    let source = "typedef Count = number\nlocal count: Count = 'many'";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     assert_eq!(check(source, &prepared, &ast, &[]).len(), 1);
 
-    let source = "type Job = 'police' | 'medic'\nlocal job: Job = 'police'";
+    let source = "typedef Job = 'police' | 'medic'\nlocal job: Job = 'police'";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     assert!(check(source, &prepared, &ast, &[]).is_empty());
 }
 
 #[test]
 fn rejects_invalid_record_literals_and_unknown_fields() {
-    let source = "type Job = 'police' | 'medic'\ntype Player = { id: number, job: Job? }\nlocal player: Player = { id = 42, job = 'sex', foo = 1 }\nprint(player.foo)";
+    let source = "typedef Job = 'police' | 'medic'\ntypedef Player = { id: number, job: Job? }\nlocal player: Player = { id = 42, job = 'sex', foo = 1 }\nprint(player.foo)";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert!(diagnostics.len() >= 2, "{diagnostics:?}");
     assert!(
@@ -762,7 +771,8 @@ fn checks_known_function_calls_and_ignores_unknown_external_calls() {
     let source = "local function take(value: number): number return value end\ntake('wrong')\nExternalFunction('anything')";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "LT2002");
@@ -789,8 +799,9 @@ fn checks_anonymous_function_values_and_table_fields() {
         ),
     ] {
         let prepared = prepare(source);
-        let ast = full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau())
-            .into_ast();
+        let ast =
+            full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+                .into_ast();
         let diagnostics = check(source, &prepared, &ast, &[]);
         assert!(
             diagnostics
@@ -945,7 +956,7 @@ fn rejects_calls_to_known_non_callable_values() {
 
 #[test]
 fn rejects_missing_function_fields_through_record_aliases() {
-    let source = "type Config = { Print: (message: string) -> nil }\ntype Wrapper = { config: Config }\nlocal cfg: Config = { Print = function(message: string) end }\nlocal wrapper: Wrapper = { config = cfg }\ncfg.Missing('x')\ncfg['Missing']('x')\nwrapper.config.Missing('x')";
+    let source = "typedef Config = { Print: (message: string) -> nil }\ntypedef Wrapper = { config: Config }\nlocal cfg: Config = { Print = function(message: string) end }\nlocal wrapper: Wrapper = { config = cfg }\ncfg.Missing('x')\ncfg['Missing']('x')\nwrapper.config.Missing('x')";
     let error = crate::compile_source(source).unwrap_err();
     assert_eq!(
         error
@@ -970,7 +981,8 @@ fn checks_literal_returns_against_known_function_signatures() {
     let source = "local function take(): number return 'wrong' end";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "LT2004");
@@ -986,7 +998,8 @@ fn checks_record_literals_at_known_call_and_return_boundaries() {
     let source = "local function take(player: { name: number }) end\ntake({ name = 'Ada' })\nlocal function getPlayer(): { name: number } return { name = 'Ada' } end";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 2);
     assert!(
@@ -998,10 +1011,11 @@ fn checks_record_literals_at_known_call_and_return_boundaries() {
 
 #[test]
 fn checks_record_field_types_inside_known_function_returns() {
-    let source = "type Player = { name: number }\nlocal function playerName(player: Player): string return player.name end";
+    let source = "typedef Player = { name: number }\nlocal function playerName(player: Player): string return player.name end";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "LT2004");
@@ -1009,11 +1023,11 @@ fn checks_record_field_types_inside_known_function_returns() {
 
 #[test]
 fn optional_property_access_adds_nil_to_a_known_field_type() {
-    let source =
-        "type Player = { id: number }\nlocal player: Player? = nil\nlocal id: number = player?.id";
+    let source = "typedef Player = { id: number }\nlocal player: Player? = nil\nlocal id: number = player?.id";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "LT2001");
@@ -1024,16 +1038,18 @@ fn block_locals_do_not_leak_or_overwrite_outer_types() {
     let source = "local value: number = 1\ndo\n    local value: string = 'inside'\nend\nlocal after: number = value";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     assert!(check(source, &prepared, &ast, &[]).is_empty());
 }
 
 #[test]
 fn substitutes_generic_alias_parameters_in_record_fields() {
-    let source = "type Box<T> = { value: T }\nlocal box: Box<number> = { value = 'wrong' }";
+    let source = "typedef Box<T> = { value: T }\nlocal box: Box<number> = { value = 'wrong' }";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "LT2001");
@@ -1041,10 +1057,11 @@ fn substitutes_generic_alias_parameters_in_record_fields() {
 
 #[test]
 fn checks_later_assignments_to_annotated_variables_and_record_fields() {
-    let source = "type Player = { name: number }\nlocal count: number = 1\ncount = 'wrong'\nlocal player: Player = { name = 1 }\nplayer.name = 'Ada'";
+    let source = "typedef Player = { name: number }\nlocal count: number = 1\ncount = 'wrong'\nlocal player: Player = { name = 1 }\nplayer.name = 'Ada'";
     let prepared = prepare(source);
     let ast =
-        full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau()).into_ast();
+        full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+            .into_ast();
     let diagnostics = check(source, &prepared, &ast, &[]);
     assert_eq!(diagnostics.len(), 2);
     assert!(
@@ -1184,13 +1201,13 @@ fn iterator_function_return_types_bind_generic_for_variables() {
 
 #[test]
 fn ipairs_binds_the_array_element_type() {
-    let source = "type List = { number }\nlocal values: List = { 1 }\nfor _, value in ipairs(values) do\n local label: string = value\nend";
+    let source = "typedef List = { number }\nlocal values: List = { 1 }\nfor _, value in ipairs(values) do\n local label: string = value\nend";
     assert!(crate::compile_source(source).is_err());
 }
 
 #[test]
 fn pairs_binds_dictionary_key_and_value_types() {
-    let source = "type Dictionary = { [string]: number }\nlocal values: Dictionary = { score = 1 }\nfor key, value in pairs(values) do\n local label: string = value\nend";
+    let source = "typedef Dictionary = { [string]: number }\nlocal values: Dictionary = { score = 1 }\nfor key, value in pairs(values) do\n local label: string = value\nend";
     assert!(crate::compile_source(source).is_err());
 }
 
@@ -1305,7 +1322,7 @@ fn rejects_non_literal_values_for_literal_parameters() {
     }
     for source in [
         "local function take(value: 'info') end\ntake('info')",
-        "type Status = 'info' | 'warning'\nlocal function take(value: Status?) end\ntake('info')",
+        "typedef Status = 'info' | 'warning'\nlocal function take(value: Status?) end\ntake('info')",
     ] {
         assert!(crate::compile_source(source).is_ok(), "{source}");
     }
@@ -1405,6 +1422,6 @@ fn parallel_local_initializers_use_the_outer_scope() {
 
 #[test]
 fn type_alias_shadowing_is_restored_after_nested_blocks() {
-    let source = "type Value = string\ndo\n type Value = number\n local inner: Value = 1\nend\nlocal outer: Value = 'text'";
+    let source = "typedef Value = string\ndo\n typedef Value = number\n local inner: Value = 1\nend\nlocal outer: Value = 'text'";
     assert!(crate::compile_source(source).is_ok());
 }

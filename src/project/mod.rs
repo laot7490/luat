@@ -1,19 +1,19 @@
 mod config;
-mod declarations;
 mod imports;
 mod manifest;
 
 use config::FiveMConfig;
 pub use config::ProjectConfig;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
 
 use crate::compiler::{
-    check_project_source, check_source_with_declarations, compile_project_source_unformatted,
+    check_project_source_with_set, compile_project_source_unformatted_with_set,
+    declarations::{DeclarationSet, DeclarationSource},
 };
 use crate::{CompileError, Diagnostic};
 
@@ -75,6 +75,19 @@ pub struct Project {
     sources: Vec<SourceFile>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedImport {
+    pub target_path: PathBuf,
+    pub type_name: String,
+}
+
+pub(crate) type ResolvedImports = HashMap<PathBuf, HashMap<String, ResolvedImport>>;
+type SelectedCheck = (
+    BTreeSet<PathBuf>,
+    Result<BuildResult, BuildError>,
+    Option<ResolvedImports>,
+);
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct BuildResult {
     pub compiled_files: usize,
@@ -104,8 +117,16 @@ impl Project {
             path: config_path.clone(),
             source,
         })?;
+        Self::load_with_config_text(&config_path, &text)
+    }
+
+    pub(crate) fn load_with_config_text(
+        config_path: &Path,
+        text: &str,
+    ) -> Result<Self, BuildError> {
+        let config_path = config_path.to_path_buf();
         let config: ProjectConfig =
-            toml::from_str(&text).map_err(|error| BuildError::Configuration {
+            toml::from_str(text).map_err(|error| BuildError::Configuration {
                 path: config_path.clone(),
                 message: error.to_string(),
             })?;
@@ -357,41 +378,237 @@ impl Project {
         &self.warnings
     }
 
+    pub(crate) fn editor_contexts(
+        &self,
+        overlays: &std::collections::HashMap<PathBuf, String>,
+    ) -> std::collections::HashMap<PathBuf, Vec<crate::ExecutionContext>> {
+        self.analyze_imports_with_overlays(overlays)
+            .map(|plan| plan.execution_contexts)
+            .unwrap_or_default()
+    }
+
     pub fn declaration_files(&self) -> &[PathBuf] {
         &self.declarations
+    }
+
+    pub(crate) fn source_paths(&self) -> impl Iterator<Item = &Path> {
+        self.sources
+            .iter()
+            .filter(|file| file.output.is_some())
+            .map(|file| file.input.as_path())
     }
 
     pub fn check(&self) -> Result<BuildResult, BuildError> {
         Self::load(&self.config_path)?.check_current()
     }
 
+    pub fn check_with_overlays(
+        &self,
+        overlays: &std::collections::HashMap<PathBuf, String>,
+    ) -> Result<BuildResult, BuildError> {
+        self.check_current_with_overlays(overlays)
+    }
+
+    pub(crate) fn check_changed_with_overlays_and_imports(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+        changed_paths: &BTreeSet<PathBuf>,
+    ) -> (
+        BTreeSet<PathBuf>,
+        Result<(), BuildError>,
+        Option<ResolvedImports>,
+    ) {
+        let (checked_paths, result, imports) =
+            self.check_selected_with_overlays(overlays, Some(changed_paths), None);
+        (checked_paths, result.map(|_| ()), imports)
+    }
+
+    pub(crate) fn check_changed_with_declarations_and_imports(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+        changed_paths: &BTreeSet<PathBuf>,
+        declarations: &DeclarationSet,
+    ) -> (
+        BTreeSet<PathBuf>,
+        Result<(), BuildError>,
+        Option<ResolvedImports>,
+    ) {
+        let (checked_paths, result, imports) =
+            self.check_selected_with_overlays(overlays, Some(changed_paths), Some(declarations));
+        (checked_paths, result.map(|_| ()), imports)
+    }
+
     fn check_current(&self) -> Result<BuildResult, BuildError> {
-        let plan = self.analyze_imports()?;
+        self.check_current_with_overlays(&std::collections::HashMap::new())
+    }
+
+    fn check_current_with_overlays(
+        &self,
+        overlays: &std::collections::HashMap<PathBuf, String>,
+    ) -> Result<BuildResult, BuildError> {
+        self.check_selected_with_overlays(overlays, None, None).1
+    }
+
+    fn check_selected_with_overlays(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+        changed_paths: Option<&BTreeSet<PathBuf>>,
+        cached_declarations: Option<&DeclarationSet>,
+    ) -> SelectedCheck {
+        let plan = match self.analyze_imports_with_overlays(overlays) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return (overlays.keys().cloned().collect(), Err(error), None);
+            }
+        };
+        let imports = self.resolved_imports(&plan);
+        let checked_paths = changed_paths.map_or_else(
+            || {
+                self.sources
+                    .iter()
+                    .filter(|file| file.output.is_some())
+                    .map(|file| file.input.clone())
+                    .collect()
+            },
+            |changed| self.dependent_source_paths(&plan, changed),
+        );
         let mut errors = Vec::new();
-        let declarations = self.read_declarations()?;
+        let owned_declarations;
+        let declarations = match cached_declarations {
+            Some(declarations) => declarations,
+            None => {
+                owned_declarations = match self.read_declarations_with_overlays(overlays) {
+                    Ok(declarations) => declarations,
+                    Err(error) => return (checked_paths, Err(error), Some(imports)),
+                };
+                &owned_declarations
+            }
+        };
         for file in &self.sources {
+            if !checked_paths.contains(&file.input) {
+                continue;
+            }
             let Some(source) = plan.texts.get(&file.input) else {
                 continue;
             };
-            let checked = if file.output.is_none() {
-                declarations::validate_declaration(source)
-                    .and_then(|()| check_source_with_declarations(source, &declarations))
-            } else {
-                check_project_source(
+            if file.output.is_none() {
+                continue;
+            }
+            let contexts = plan
+                .execution_contexts
+                .get(&file.input)
+                .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
+                .filter(|contexts| !contexts.is_empty())
+                .unwrap_or_else(|| vec![None]);
+            let mut diagnostics = Vec::new();
+            for context in contexts {
+                if let Err(error) = check_project_source_with_set(
                     source,
-                    &declarations,
+                    declarations,
                     true,
                     plan.import_types.get(&file.input),
-                )
-            };
-            if let Err(error) = checked {
-                errors.push((file.input.clone(), error));
+                    context,
+                ) {
+                    for diagnostic in error.diagnostics {
+                        if !diagnostics.contains(&diagnostic) {
+                            diagnostics.push(diagnostic);
+                        }
+                    }
+                }
+            }
+            if !diagnostics.is_empty() {
+                errors.push((file.input.clone(), CompileError { diagnostics }));
             }
         }
         if !errors.is_empty() {
-            return Err(compile_errors(errors));
+            return (checked_paths, Err(compile_errors(errors)), Some(imports));
         }
-        Ok(self.result(None, &plan))
+        (checked_paths, Ok(self.result(None, &plan)), Some(imports))
+    }
+
+    fn resolved_imports(&self, plan: &imports::ImportPlan) -> ResolvedImports {
+        let paths = self
+            .sources
+            .iter()
+            .filter_map(|file| {
+                let output = file.output.as_ref()?;
+                let id = output
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some((id, file.input.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        plan.resolved
+            .iter()
+            .filter_map(|(importer, imports)| {
+                let types = plan.import_types.get(importer)?;
+                let resolved = imports
+                    .iter()
+                    .filter_map(|(specifier, id)| {
+                        Some((
+                            specifier.clone(),
+                            ResolvedImport {
+                                target_path: paths.get(id)?.clone(),
+                                type_name: types.get(specifier)?.clone(),
+                            },
+                        ))
+                    })
+                    .collect::<HashMap<_, _>>();
+                Some((importer.clone(), resolved))
+            })
+            .collect()
+    }
+
+    fn dependent_source_paths(
+        &self,
+        plan: &imports::ImportPlan,
+        changed_paths: &BTreeSet<PathBuf>,
+    ) -> BTreeSet<PathBuf> {
+        let all_paths = self
+            .sources
+            .iter()
+            .filter(|file| file.output.is_some())
+            .map(|file| file.input.clone())
+            .collect::<BTreeSet<_>>();
+        if changed_paths.contains(&self.config_path)
+            || self
+                .declarations
+                .iter()
+                .any(|path| changed_paths.contains(path))
+        {
+            return all_paths;
+        }
+        let path_by_id = self
+            .sources
+            .iter()
+            .filter_map(|file| {
+                let output = file.output.as_ref()?;
+                let id = output
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some((id, file.input.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut affected = changed_paths.clone();
+        loop {
+            let mut grew = false;
+            for (importer, imports) in &plan.resolved {
+                if imports.values().any(|id| {
+                    path_by_id
+                        .get(id)
+                        .is_some_and(|path| affected.contains(path))
+                }) {
+                    grew |= affected.insert(importer.clone());
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        affected.retain(|path| all_paths.contains(path));
+        affected
     }
 
     pub fn build(&self) -> Result<BuildResult, BuildError> {
@@ -432,6 +649,9 @@ impl Project {
                     }
                 }
                 Err(BuildError::Compile { path, error }) => errors.push((path, error)),
+                Err(BuildError::CompileMany(mut compile_errors)) => {
+                    errors.append(&mut compile_errors)
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -449,44 +669,109 @@ impl Project {
         }
     }
 
-    fn read_declarations(&self) -> Result<Vec<String>, BuildError> {
-        self.declarations
-            .iter()
-            .map(|path| {
-                fs::read_to_string(path).map_err(|source| BuildError::Io {
-                    path: path.clone(),
-                    source,
+    fn read_declarations(&self) -> Result<DeclarationSet, BuildError> {
+        self.read_declarations_with_overlays(&std::collections::HashMap::new())
+    }
+
+    pub(crate) fn read_declarations_with_overlays(
+        &self,
+        overlays: &std::collections::HashMap<PathBuf, String>,
+    ) -> Result<DeclarationSet, BuildError> {
+        let mut sources = vec![
+            DeclarationSource {
+                path: None,
+                context: Some(crate::ExecutionContext::Client),
+                text: include_str!("../../lsp/definitions/fivem-client.d.luat").to_owned(),
+            },
+            DeclarationSource {
+                path: None,
+                context: Some(crate::ExecutionContext::Server),
+                text: include_str!("../../lsp/definitions/fivem-server.d.luat").to_owned(),
+            },
+            DeclarationSource {
+                path: None,
+                context: None,
+                text: include_str!("../../lsp/definitions/fivem-shared.d.luat").to_owned(),
+            },
+            DeclarationSource {
+                path: None,
+                context: None,
+                text: include_str!("../../lsp/definitions/runtime-shared.d.luat").to_owned(),
+            },
+            DeclarationSource {
+                path: None,
+                context: Some(crate::ExecutionContext::Client),
+                text: include_str!("../../lsp/definitions/runtime-client.d.luat").to_owned(),
+            },
+            DeclarationSource {
+                path: None,
+                context: Some(crate::ExecutionContext::Server),
+                text: include_str!("../../lsp/definitions/runtime-server.d.luat").to_owned(),
+            },
+        ];
+        sources.extend(
+            self.declarations
+                .iter()
+                .map(|path| {
+                    overlays
+                        .get(path)
+                        .cloned()
+                        .map(Ok)
+                        .unwrap_or_else(|| fs::read_to_string(path))
+                        .map(|text| DeclarationSource {
+                            path: Some(path.clone()),
+                            context: None,
+                            text,
+                        })
+                        .map_err(|source| BuildError::Io {
+                            path: path.clone(),
+                            source,
+                        })
                 })
-            })
-            .collect()
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
+            path: path.unwrap_or_else(|| self.config_path.clone()),
+            error,
+        })
     }
 
     fn compile(
         &self,
         file: &SourceFile,
-        declarations: &[String],
+        declarations: &DeclarationSet,
         plan: &imports::ImportPlan,
     ) -> Result<String, BuildError> {
         let source = &plan.texts[&file.input];
         if file.output.is_none() {
-            declarations::validate_declaration(source)
-                .and_then(|()| check_source_with_declarations(source, declarations))
-                .map_err(|error| BuildError::Compile {
-                    path: file.input.clone(),
-                    error,
-                })?;
             return Ok(String::new());
         }
-        let compiled = compile_project_source_unformatted(
-            source,
-            declarations,
-            plan.resolved.get(&file.input),
-            plan.import_types.get(&file.input),
-        )
-        .map_err(|error| BuildError::Compile {
-            path: file.input.clone(),
-            error,
-        })?;
+        let contexts = plan
+            .execution_contexts
+            .get(&file.input)
+            .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
+            .filter(|contexts| !contexts.is_empty())
+            .unwrap_or_else(|| vec![None]);
+        let mut errors = Vec::new();
+        let mut compiled = None;
+        for context in contexts {
+            match compile_project_source_unformatted_with_set(
+                source,
+                declarations,
+                plan.resolved.get(&file.input),
+                plan.import_types.get(&file.input),
+                context,
+            ) {
+                Ok(output) => {
+                    compiled.get_or_insert(output);
+                }
+                Err(error) => errors.push((file.input.clone(), error)),
+            };
+        }
+        if !errors.is_empty() {
+            return Err(compile_errors(errors));
+        }
+        let compiled = compiled.unwrap_or_default();
         let generated = if plan.wrapped.contains(&file.input) {
             let id = file
                 .output

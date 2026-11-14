@@ -1,9 +1,10 @@
 use full_moon::LuaVersion;
 
+pub(crate) mod declarations;
 pub(crate) mod imports;
 mod lower;
 pub(crate) mod syntax;
-mod typecheck;
+pub(crate) mod typecheck;
 
 pub(crate) fn format_output(source: &str, generated: &str) -> Result<String, CompileError> {
     let config = stylua_lib::Config {
@@ -32,11 +33,19 @@ pub(crate) fn format_output(source: &str, generated: &str) -> Result<String, Com
     })
 }
 
-use crate::diagnostic::{CompileError, parser_diagnostics};
+use crate::{
+    ExecutionContext,
+    diagnostic::{CompileError, parser_diagnostics},
+};
+use declarations::DeclarationSet;
 
 /// Checks LuaT source and returns CfxLua with type-only syntax removed.
 pub fn compile_source(source: &str) -> Result<String, CompileError> {
     compile_source_with_declarations(source, &[])
+}
+
+pub(crate) fn check_source_for_analysis(source: &str) -> Result<(), CompileError> {
+    check_project_source_with_set(source, &DeclarationSet::default(), false, None, None)
 }
 
 pub(crate) fn compile_source_with_declarations(
@@ -52,16 +61,27 @@ pub(crate) fn compile_project_source(
     imports: Option<&std::collections::HashMap<String, String>>,
     import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<String, CompileError> {
-    let output = compile_project_source_unformatted(source, declarations, imports, import_types)?;
+    let declarations = DeclarationSet::from_texts(declarations)?;
+    let output = compile_project_source_unformatted_with_set(
+        source,
+        &declarations,
+        imports,
+        import_types,
+        None,
+    )?;
     format_output(source, &output)
 }
 
-pub(crate) fn compile_project_source_unformatted(
+pub(crate) fn compile_project_source_unformatted_with_set(
     source: &str,
-    declarations: &[String],
+    declarations: &DeclarationSet,
     imports: Option<&std::collections::HashMap<String, String>>,
     import_types: Option<&std::collections::HashMap<String, String>>,
+    execution_context: Option<ExecutionContext>,
 ) -> Result<String, CompileError> {
+    if let Some(error) = syntax::invalid_type_alias_error(source) {
+        return Err(error);
+    }
     let prepared = syntax::prepare(source);
     let lua_version = LuaVersion::cfxlua().with_luau();
     let parsed = full_moon::parse_fallible(&prepared.text, lua_version);
@@ -75,7 +95,14 @@ pub(crate) fn compile_project_source_unformatted(
 
     let ast = parsed.into_ast();
     self::imports::analyze(source, &prepared, &ast, imports.is_some())?;
-    check_ast(source, &prepared, &ast, declarations, import_types)?;
+    check_ast(
+        source,
+        &prepared,
+        &ast,
+        declarations,
+        import_types,
+        execution_context,
+    )?;
 
     let lowered = lower::lower(source, &prepared, &ast)?;
     let lowered = if let Some(imports) = imports {
@@ -86,6 +113,7 @@ pub(crate) fn compile_project_source_unformatted(
     Ok(lowered)
 }
 
+#[cfg(test)]
 pub(crate) fn check_source_with_declarations(
     source: &str,
     declarations: &[String],
@@ -100,12 +128,27 @@ pub(crate) fn infer_module_export_type(
     typecheck::infer_module_export_type(source, import_types)
 }
 
+#[cfg(test)]
 pub(crate) fn check_project_source(
     source: &str,
     declarations: &[String],
     project_context: bool,
     import_types: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), CompileError> {
+    let declarations = DeclarationSet::from_texts(declarations)?;
+    check_project_source_with_set(source, &declarations, project_context, import_types, None)
+}
+
+pub(crate) fn check_project_source_with_set(
+    source: &str,
+    declarations: &DeclarationSet,
+    project_context: bool,
+    import_types: Option<&std::collections::HashMap<String, String>>,
+    execution_context: Option<ExecutionContext>,
+) -> Result<(), CompileError> {
+    if let Some(error) = syntax::invalid_type_alias_error(source) {
+        return Err(error);
+    }
     let prepared = syntax::prepare(source);
     let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
     if !parsed.errors().is_empty() {
@@ -117,7 +160,14 @@ pub(crate) fn check_project_source(
     }
     let ast = parsed.into_ast();
     imports::analyze(source, &prepared, &ast, project_context)?;
-    check_ast(source, &prepared, &ast, declarations, import_types)
+    check_ast(
+        source,
+        &prepared,
+        &ast,
+        declarations,
+        import_types,
+        execution_context,
+    )
 }
 
 pub(crate) fn collect_imports(source: &str) -> Result<Vec<imports::ImportCall>, CompileError> {
@@ -137,11 +187,18 @@ fn check_ast(
     source: &str,
     prepared: &syntax::PreparedSource,
     ast: &full_moon::ast::Ast,
-    declarations: &[String],
+    declarations: &DeclarationSet,
     import_types: Option<&std::collections::HashMap<String, String>>,
+    execution_context: Option<ExecutionContext>,
 ) -> Result<(), CompileError> {
-    let diagnostics =
-        typecheck::check_with_imports(source, prepared, ast, declarations, import_types);
+    let diagnostics = typecheck::check_with_imports(
+        source,
+        prepared,
+        ast,
+        declarations,
+        import_types,
+        execution_context,
+    );
     if diagnostics.is_empty() {
         Ok(())
     } else {
@@ -162,8 +219,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_type_alias_syntax_but_keeps_lua_type_calls() {
+        for source in [
+            "type Player = string",
+            "type List<T> = { T }",
+            "export type Player = string",
+        ] {
+            let error = compile_source(source).unwrap_err();
+            assert!(
+                error.to_string().contains("Invalid type alias syntax."),
+                "{source}: {error}"
+            );
+            assert!(!error.to_string().contains("Use 'typedef'"));
+        }
+
+        let output = compile_source(
+            "local kind = type(1)\nlocal f = type\nfunction type(value) end\nio.type()",
+        )
+        .unwrap();
+        assert!(output.contains("type(1)"));
+        assert!(output.contains("local f = type"));
+        assert!(output.contains("function type(value)"));
+        assert!(output.contains("io.type()"));
+
+        let declaration = super::declarations::parse_declaration_file("type Old = string")
+            .err()
+            .expect("legacy declarations should be rejected");
+        assert!(
+            declaration
+                .to_string()
+                .contains("Invalid type alias syntax.")
+        );
+    }
+
+    #[test]
+    fn accepts_and_erases_generic_nullable_and_scoped_typedefs() {
+        let source = "typedef Maybe<T> = T?\ndo typedef Hidden = number end\nlocal value: Maybe<number> = nil";
+        let output = compile_source(source).unwrap();
+        assert!(!output.contains("typedef"), "{output}");
+        assert!(!output.contains("Hidden"), "{output}");
+        assert!(output.contains("local value"), "{output}");
+    }
+
+    #[test]
+    fn rejects_exported_typedef_syntax() {
+        assert!(compile_source("export typedef Public = string").is_err());
+    }
+
+    #[test]
     fn preserves_cfxlua_extensions_and_erases_types() {
-        let source = "type Name = string\nlocal name: Name = `adder`\ncount += 1\n";
+        let source = "typedef Name = string\nlocal name: Name = `adder`\ncount += 1\n";
         let output = compile_source(source).unwrap();
         assert!(output.contains("count += 1"));
         assert!(!output.contains("type Name"));
@@ -255,7 +360,7 @@ mod tests {
     #[test]
     fn check_and_build_report_the_same_missing_record_field() {
         let source =
-            "type Player = { id: number, job: string }\nlocal player: Player = { id = 42 }";
+            "typedef Player = { id: number, job: string }\nlocal player: Player = { id = 42 }";
         let compiled = compile_source(source).unwrap_err();
         let checked = check_source_with_declarations(source, &[]).unwrap_err();
         assert_eq!(compiled.diagnostics, checked.diagnostics);
@@ -268,7 +373,7 @@ mod tests {
 
     #[test]
     fn record_diagnostics_after_templates_point_into_the_original_source() {
-        let source = "type P = { name: string }\nlocal text = `Merhaba, {name}`\nlocal bad: P = {}\n-- trailing comment";
+        let source = "typedef P = { name: string }\nlocal text = `Merhaba, {name}`\nlocal bad: P = {}\n-- trailing comment";
         let error = compile_source(source).unwrap_err();
         let diagnostic = &error.diagnostics[0];
 
@@ -320,7 +425,7 @@ mod tests {
 
     #[test]
     fn composes_template_optional_and_coalesce_maps_for_unicode_crlf_sources() {
-        let source = "type Player = { label: string, note?: string }\r\nlocal text = `Ça {name}`\r\nlocal fallback = input ?? 'unknown'\r\nlocal bad: Player = { label = 12 }\r\n-- trailing comment";
+        let source = "typedef Player = { label: string, note?: string }\r\nlocal text = `Ça {name}`\r\nlocal fallback = input ?? 'unknown'\r\nlocal bad: Player = { label = 12 }\r\n-- trailing comment";
         let error = compile_source(source).unwrap_err();
         let diagnostic = &error.diagnostics[0];
 
@@ -332,8 +437,8 @@ mod tests {
     fn imported_generic_record_aliases_keep_check_and_build_diagnostics_equal() {
         let source = "local players: List<Player> = { { id = 1 } }";
         let declarations = [
-            "type Player = { id: number, callsign: string }".to_owned(),
-            "type List<T> = { T }".to_owned(),
+            "typedef Player = { id: number, callsign: string }".to_owned(),
+            "typedef List<T> = { T }".to_owned(),
         ];
         let built = compile_source_with_declarations(source, &declarations).unwrap_err();
         let checked = check_source_with_declarations(source, &declarations).unwrap_err();
@@ -369,24 +474,34 @@ mod tests {
     #[test]
     fn reports_recursive_alias_cycles_from_declaration_files_at_the_use_site() {
         let source = "local value: Loop = 1";
-        let error =
-            compile_source_with_declarations(source, &["type Loop = Loop".to_owned()]).unwrap_err();
+        let error = compile_source_with_declarations(source, &["typedef Loop = Loop".to_owned()])
+            .unwrap_err();
 
         assert_eq!(error.diagnostics[0].code, "LT2006");
-        assert_eq!(&source[error.diagnostics[0].source_range.clone()], "Loop");
+        assert_eq!(
+            &source[error.diagnostics[0].source_range.clone()],
+            "Loop",
+            "{:?}",
+            error.diagnostics[0]
+        );
     }
 
     #[test]
     fn reports_deep_alias_expansion_from_declaration_files_at_the_use_site() {
-        let mut declarations = vec!["type A0 = number".to_owned()];
+        let mut declarations = vec!["typedef A0 = number".to_owned()];
         for index in 1..=129 {
-            declarations.push(format!("type A{index} = A{}", index - 1));
+            declarations.push(format!("typedef A{index} = A{}", index - 1));
         }
         let source = "local value: A129 = 1";
         let error = compile_source_with_declarations(source, &declarations).unwrap_err();
 
         assert_eq!(error.diagnostics[0].code, "LT2006");
-        assert_eq!(&source[error.diagnostics[0].source_range.clone()], "A129");
+        assert_eq!(
+            &source[error.diagnostics[0].source_range.clone()],
+            "A129",
+            "{:?}",
+            error.diagnostics[0]
+        );
     }
 
     #[test]
@@ -395,7 +510,7 @@ mod tests {
             "local spawnOffset: vector3 = vector4(0.0, 0.0, 1.0, 0.0)",
             "local first: Player = { name = 'Ada' }\nlocal firstName: string = first.ax ?? 'Unknown'",
         ] {
-            let declarations = ["type Player = { name: string }".to_owned()];
+            let declarations = ["typedef Player = { name: string }".to_owned()];
             let built = compile_source_with_declarations(source, &declarations).unwrap_err();
             let checked = check_source_with_declarations(source, &declarations).unwrap_err();
             assert_eq!(built.diagnostics, checked.diagnostics);
@@ -403,16 +518,16 @@ mod tests {
         let source = "local first: Player = { name = 'Ada' }\nlocal firstName: string = first.ax ?? 'Unknown'";
         let error = compile_source_with_declarations(
             source,
-            &["type Player = { name: string }".to_owned()],
+            &["typedef Player = { name: string }".to_owned()],
         )
         .unwrap_err();
         assert_eq!(error.diagnostics[0].code, "LT2005");
 
         for source in [
-            "type Player = { callsign: string }\ntype List<T> = { T }\nlocal players: List<Player> = { {} }",
-            "type Dictionary = { [string]: number }\nlocal values: Dictionary = { count = 'bad' }",
-            "type A = { a: string }\ntype B = { b: number }\ntype Either = A | B\nlocal value: Either = { a = 'ok', b = 'bad' }",
-            "type List<T> = { T }\nlocal values: List<number> = { 1 }\nvalues[2] = 'bad'",
+            "typedef Player = { callsign: string }\ntypedef List<T> = { T }\nlocal players: List<Player> = { {} }",
+            "typedef Dictionary = { [string]: number }\nlocal values: Dictionary = { count = 'bad' }",
+            "typedef A = { a: string }\ntypedef B = { b: number }\ntypedef Either = A | B\nlocal value: Either = { a = 'ok', b = 'bad' }",
+            "typedef List<T> = { T }\nlocal values: List<number> = { 1 }\nvalues[2] = 'bad'",
         ] {
             let built = compile_source(source).unwrap_err();
             let checked = check_source_with_declarations(source, &[]).unwrap_err();
@@ -423,13 +538,13 @@ mod tests {
     #[test]
     fn optional_record_fields_compile_and_erase() {
         let output =
-            compile_source("type Player = { coords?: vector3 }\nlocal p: Player = {}").unwrap();
+            compile_source("typedef Player = { coords?: vector3 }\nlocal p: Player = {}").unwrap();
         assert!(!output.contains("type Player"));
         assert!(!output.contains("coords?"));
-        assert!(compile_source("type P = { name?: string }\nlocal p: P = {name = 2}").is_err());
+        assert!(compile_source("typedef P = { name?: string }\nlocal p: P = {name = 2}").is_err());
         assert!(
             compile_source(
-                "local name = 'Ada'\n type P = { name?: string }\n local p: P = {name = name}"
+                "local name = 'Ada'\n typedef P = { name?: string }\n local p: P = {name = name}"
             )
             .is_ok()
         );
@@ -442,6 +557,15 @@ mod tests {
     }
 
     #[test]
+    fn preserves_cfxlua_compound_assignments() {
+        for operator in ["+=", "-=", "*=", "/=", "^=", "<<=", ">>=", "&=", "|="] {
+            let source = format!("local value: number = 8\nvalue {operator} 2");
+            let output = compile_source(&source).unwrap();
+            assert!(output.contains(&format!("value {operator} 2")), "{output}");
+        }
+    }
+
+    #[test]
     fn type_is_still_usable_as_a_runtime_identifier() {
         let output = compile_source("local type = type\nprint(type('x'))").unwrap();
         assert!(output.contains("local type = type"));
@@ -449,7 +573,7 @@ mod tests {
 
     #[test]
     fn removes_generic_aliases_and_function_annotations() {
-        let source = "type List<T> = {T}\nlocal function first<T>(items: List<T>): T\n    return items[1]\nend\n";
+        let source = "typedef List<T> = {T}\nlocal function first<T>(items: List<T>): T\n    return items[1]\nend\n";
         let output = compile_source(source).unwrap();
         assert!(!output.contains("type List"));
         assert!(!output.contains("<T>"));

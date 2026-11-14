@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::*;
+use crate::ExecutionContext;
 use crate::compiler::{
     collect_imports,
     imports::{ImportCall, lua_string},
@@ -14,6 +15,7 @@ pub(super) struct ImportPlan {
     pub wrapped: HashSet<PathBuf>,
     pub scripts: Option<[Vec<String>; 3]>,
     pub entries: Vec<(PathBuf, String)>,
+    pub execution_contexts: HashMap<PathBuf, Vec<ExecutionContext>>,
 }
 
 struct Module {
@@ -238,15 +240,25 @@ fn output_path_for(id: &str, out_dir: &Path) -> String {
 
 impl Project {
     pub(super) fn analyze_imports(&self) -> Result<ImportPlan, BuildError> {
+        self.analyze_imports_with_overlays(&HashMap::new())
+    }
+
+    pub(super) fn analyze_imports_with_overlays(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+    ) -> Result<ImportPlan, BuildError> {
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
         let mut paths = HashMap::new();
         for file in &self.sources {
             if file.output.is_none() {
-                let source = fs::read_to_string(&file.input).map_err(|source| BuildError::Io {
-                    path: file.input.clone(),
-                    source,
-                })?;
+                let source = match overlays.get(&file.input) {
+                    Some(source) => source.clone(),
+                    None => fs::read_to_string(&file.input).map_err(|source| BuildError::Io {
+                        path: file.input.clone(),
+                        source,
+                    })?,
+                };
                 plan.texts.insert(file.input.clone(), source);
                 continue;
             }
@@ -290,6 +302,29 @@ impl Project {
                     .map(str::to_owned)
             })
             .collect::<Vec<_>>();
+        let roots = originals
+            .iter()
+            .enumerate()
+            .flat_map(|(side, paths)| {
+                let contexts: &[ExecutionContext] = match side {
+                    0 => &[ExecutionContext::Client, ExecutionContext::Server],
+                    1 => &[ExecutionContext::Client],
+                    _ => &[ExecutionContext::Server],
+                };
+                paths
+                    .iter()
+                    .filter_map(|path| {
+                        path.strip_prefix("src/")
+                            .and_then(|path| path.strip_suffix(".luat"))
+                            .map(|id| {
+                                contexts
+                                    .iter()
+                                    .map(move |context| (id.to_owned(), *context))
+                            })
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
         let mut visited = HashSet::new();
         while let Some(id) = pending.pop() {
             if !visited.insert(id.clone()) {
@@ -298,10 +333,13 @@ impl Project {
             let Some(path) = paths.get(&id).cloned() else {
                 continue;
             };
-            let source = fs::read_to_string(&path).map_err(|source| BuildError::Io {
-                path: path.clone(),
-                source,
-            })?;
+            let source = match overlays.get(&path) {
+                Some(source) => source.clone(),
+                None => fs::read_to_string(&path).map_err(|source| BuildError::Io {
+                    path: path.clone(),
+                    source,
+                })?,
+            };
             let calls = collect_imports(&source).map_err(|error| BuildError::Compile {
                 path: path.clone(),
                 error,
@@ -328,6 +366,35 @@ impl Project {
             modules.insert(id, module);
         }
         modules.retain(|id, _| visited.contains(id));
+        let mut context_stack = roots;
+        let mut visited_contexts = HashSet::new();
+        while let Some((id, context)) = context_stack.pop() {
+            if !visited_contexts.insert((id.clone(), context)) {
+                continue;
+            }
+            let Some(module) = modules.get(&id) else {
+                continue;
+            };
+            let contexts = plan
+                .execution_contexts
+                .entry(module.path.clone())
+                .or_default();
+            if !contexts.contains(&context) {
+                contexts.push(context);
+            }
+            context_stack.extend(
+                module
+                    .edges
+                    .iter()
+                    .map(|(_, target)| (target.clone(), context)),
+            );
+        }
+        for contexts in plan.execution_contexts.values_mut() {
+            contexts.sort_by_key(|context| match context {
+                ExecutionContext::Client => 0,
+                ExecutionContext::Server => 1,
+            });
+        }
         for module in modules.values() {
             if module
                 .path
@@ -374,8 +441,8 @@ impl Project {
         }
 
         let mut declared = HashMap::<String, u8>::new();
-        for side in 0..3 {
-            for path in &originals[side] {
+        for (side, original_paths) in originals.iter().enumerate() {
+            for path in original_paths {
                 if let Some(id) = path
                     .strip_prefix("src/")
                     .and_then(|path| path.strip_suffix(".luat"))
@@ -385,8 +452,8 @@ impl Project {
             }
         }
         let mut closures: [BTreeSet<String>; 3] = Default::default();
-        for side in 0..3 {
-            for path in &originals[side] {
+        for (side, original_paths) in originals.iter().enumerate() {
+            for path in original_paths {
                 let Some(id) = path
                     .strip_prefix("src/")
                     .and_then(|path| path.strip_suffix(".luat"))
@@ -411,7 +478,7 @@ impl Project {
         let out_dir = &self.config.compiler.out_dir;
         let mut scripts: [Vec<String>; 3] = Default::default();
         scripts[0].push(output_path_for("_luat/runtime", out_dir));
-        for side in 0..3 {
+        for (side, original_paths) in originals.iter().enumerate() {
             for id in &closures[side] {
                 if plan.wrapped.contains(&modules[id].path)
                     && (side == 0 || !closures[0].contains(id))
@@ -419,7 +486,7 @@ impl Project {
                     scripts[side].push(output_path_for(id, out_dir));
                 }
             }
-            for path in &originals[side] {
+            for path in original_paths {
                 if let Some(id) = path
                     .strip_prefix("src/")
                     .and_then(|path| path.strip_suffix(".luat"))

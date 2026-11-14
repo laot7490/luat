@@ -439,10 +439,11 @@ mod tests {
 
     #[test]
     fn erases_nested_type_syntax_without_moving_source_lines() {
-        let source = "type Player = { name: string }\nlocal player: Player = { name = 'Ada' }";
-        let ast = full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua().with_luau())
-            .into_ast();
+        let source = "typedef Player = { name: string }\nlocal player: Player = { name = 'Ada' }";
         let prepared = crate::compiler::syntax::prepare(source);
+        let ast =
+            full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+                .into_ast();
         let output = lower(source, &prepared, &ast).unwrap();
         assert!(!output.contains("type Player"));
         assert!(!output.contains(": Player"));

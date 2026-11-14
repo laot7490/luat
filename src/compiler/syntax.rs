@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
+use crate::{CompileError, Diagnostic};
 use full_moon::{
     LuaVersion,
-    ast::luau::{TypeField, TypeFieldKey},
+    ast::luau::{ExportedTypeDeclaration, TypeDeclaration, TypeField, TypeFieldKey},
     node::Node,
     tokenizer::{Lexer, LexerResult, Symbol, Token, TokenType},
     visitors::Visitor,
 };
 
+#[derive(Clone)]
 pub(crate) struct PreparedSource {
     pub text: String,
     pub coalesce_operators: HashSet<usize>,
@@ -25,7 +27,8 @@ impl PreparedSource {
 
 pub(crate) fn prepare(source: &str) -> PreparedSource {
     let (expanded, template_offsets) = expand_templates(source);
-    let (normalized, normalized_offsets) = normalize_optional_fields(&expanded);
+    let typedefs = normalize_typedef_declarations(&expanded);
+    let (normalized, normalized_offsets) = normalize_optional_fields(&typedefs);
     let source_offsets = normalized_offsets
         .into_iter()
         .map(|offset| template_offsets[offset])
@@ -69,15 +72,15 @@ pub(crate) fn prepare(source: &str) -> PreparedSource {
             .is_some_and(is_identifier_character);
         if needs_left_space {
             prepared.text.push(' ');
-            prepared.original_offsets.push(start);
+            prepared.original_offsets.push(source_offsets[start]);
         }
         prepared.coalesce_operators.insert(prepared.text.len());
         prepared.text.push_str("or");
-        prepared.original_offsets.push(start);
-        prepared.original_offsets.push(end);
+        prepared.original_offsets.push(source_offsets[start]);
+        prepared.original_offsets.push(source_offsets[end]);
         if needs_right_space {
             prepared.text.push(' ');
-            prepared.original_offsets.push(end);
+            prepared.original_offsets.push(source_offsets[end]);
         }
         cursor = end;
     }
@@ -89,6 +92,158 @@ pub(crate) fn prepare(source: &str) -> PreparedSource {
         &source_offsets,
     );
     prepared
+}
+
+fn normalize_typedef_declarations(source: &str) -> String {
+    let declarations = type_alias_keyword_spans(source, "typedef");
+    if declarations.is_empty() {
+        return source.to_owned();
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    for (start, end) in declarations {
+        bytes[start..end].copy_from_slice(b"type   ");
+    }
+    String::from_utf8(bytes).expect("keyword replacement preserves UTF-8")
+}
+
+fn type_alias_keyword_spans(source: &str, keyword: &str) -> Vec<(usize, usize)> {
+    let tokens = significant_tokens(source);
+    let candidates = tokens
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, window)| {
+            let is_keyword = matches!(window[0].token_type(), TokenType::Identifier { identifier } if identifier.to_string() == keyword);
+            let has_name = matches!(window[1].token_type(), TokenType::Identifier { .. });
+            if !is_keyword || !has_name {
+                return None;
+            }
+            let after_name = index + 2;
+            let has_equals = matches!(tokens.get(after_name).map(Token::token_type), Some(TokenType::Symbol { symbol: Symbol::Equal }))
+                || (matches!(tokens.get(after_name).map(Token::token_type), Some(TokenType::Symbol { symbol: Symbol::LessThan }))
+                    && tokens[after_name + 1..]
+                        .iter()
+                        .position(|token| matches!(token.token_type(), TokenType::Symbol { symbol: Symbol::GreaterThan }))
+                        .is_some_and(|offset| matches!(tokens.get(after_name + offset + 2).map(Token::token_type), Some(TokenType::Symbol { symbol: Symbol::Equal }))));
+            has_equals.then_some((
+                window[0].start_position().bytes(),
+                window[0].end_position().bytes(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut normalized = source.as_bytes().to_vec();
+    if keyword == "typedef" {
+        for (start, end) in &candidates {
+            normalized[*start..*end].copy_from_slice(b"type   ");
+        }
+    }
+    // Recognize aliases before optional fields are rewritten, without moving offsets.
+    for offset in optional_field_markers(&tokens) {
+        normalized[offset] = b' ';
+    }
+    let Ok(normalized) = String::from_utf8(normalized) else {
+        return Vec::new();
+    };
+    let mut declarations = TypeDeclarationSpans::default();
+    declarations.visit_ast(
+        &full_moon::parse_fallible(&normalized, LuaVersion::cfxlua().with_luau()).into_ast(),
+    );
+    candidates
+        .into_iter()
+        .filter(|(start, _)| {
+            declarations
+                .plain
+                .iter()
+                .any(|(declaration, _)| declaration == start)
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct TypeDeclarationSpans {
+    plain: Vec<(usize, usize)>,
+    exported: Vec<(usize, usize, usize)>,
+}
+
+impl Visitor for TypeDeclarationSpans {
+    fn visit_type_declaration(&mut self, declaration: &TypeDeclaration) {
+        let token = declaration.type_token().token();
+        self.plain
+            .push((token.start_position().bytes(), token.end_position().bytes()));
+    }
+
+    fn visit_exported_type_declaration(&mut self, declaration: &ExportedTypeDeclaration) {
+        let start = declaration.export_token().token().start_position().bytes();
+        let type_token = declaration.type_declaration().type_token().token();
+        let type_start = type_token.start_position().bytes();
+        let end = type_token.end_position().bytes();
+        self.exported.push((start, type_start, end));
+    }
+}
+
+fn significant_tokens(source: &str) -> Vec<Token> {
+    match Lexer::new(source, LuaVersion::cfxlua().with_luau()).collect() {
+        LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
+        LexerResult::Fatal(_) => Vec::new(),
+    }
+    .into_iter()
+    .filter(|token| {
+        !matches!(
+            token.token_type(),
+            TokenType::Whitespace { .. }
+                | TokenType::SingleLineComment { .. }
+                | TokenType::MultiLineComment { .. }
+                | TokenType::CStyleComment { .. }
+        )
+    })
+    .collect()
+}
+
+pub(crate) fn invalid_type_alias_error(source: &str) -> Option<CompileError> {
+    let mut diagnostics = type_alias_keyword_spans(source, "type")
+        .into_iter()
+        .map(|(start, end)| {
+            Diagnostic::range(
+                source,
+                start,
+                end,
+                "LT1001",
+                "Invalid type alias syntax.".to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let typedef_candidates = type_alias_keyword_spans(source, "typedef");
+    if !typedef_candidates.is_empty() {
+        let mut normalized = source.as_bytes().to_vec();
+        for (start, end) in &typedef_candidates {
+            normalized[*start..*end].copy_from_slice(b"type   ");
+        }
+        if let Ok(normalized) = String::from_utf8(normalized) {
+            let mut declarations = TypeDeclarationSpans::default();
+            declarations.visit_ast(
+                &full_moon::parse_fallible(&normalized, LuaVersion::cfxlua().with_luau())
+                    .into_ast(),
+            );
+            for (start, type_start, end) in declarations.exported {
+                if typedef_candidates
+                    .iter()
+                    .any(|(candidate, _)| *candidate == type_start)
+                {
+                    diagnostics.push(Diagnostic::range(
+                        source,
+                        start,
+                        end,
+                        "LT1002",
+                        "Exported type declarations are not supported.".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    (!diagnostics.is_empty()).then_some(CompileError { diagnostics })
 }
 
 fn expand_templates(source: &str) -> (String, Vec<usize>) {
@@ -363,26 +518,30 @@ impl Visitor for TypeFields {
     }
 }
 
-fn normalize_optional_fields(source: &str) -> (String, Vec<usize>) {
-    let identity = || (source.to_owned(), (0..=source.len()).collect::<Vec<_>>());
-    let tokens = match Lexer::new(source, LuaVersion::cfxlua().with_luau()).collect() {
-        LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
-        LexerResult::Fatal(_) => return identity(),
-    };
-    let candidates = tokens
+fn optional_field_markers(tokens: &[Token]) -> Vec<usize> {
+    tokens
         .windows(3)
-        .filter(|&window| {
-            (matches!(window[0].token_type(), TokenType::Identifier { .. })
+        .filter(|window| {
+            matches!(window[0].token_type(), TokenType::Identifier { .. })
                 && is_question_mark(&window[1])
                 && matches!(
                     window[2].token_type(),
                     TokenType::Symbol {
                         symbol: Symbol::Colon
                     }
-                ))
+                )
         })
         .map(|window| window[1].start_position().bytes())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn normalize_optional_fields(source: &str) -> (String, Vec<usize>) {
+    let identity = || (source.to_owned(), (0..=source.len()).collect::<Vec<_>>());
+    let tokens = match Lexer::new(source, LuaVersion::cfxlua().with_luau()).collect() {
+        LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
+        LexerResult::Fatal(_) => return identity(),
+    };
+    let candidates = optional_field_markers(&tokens);
     if candidates.is_empty() {
         return identity();
     }
@@ -478,7 +637,57 @@ fn is_question_mark(token: &Token) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_templates, prepare};
+    use super::{expand_templates, invalid_type_alias_error, prepare};
+
+    #[test]
+    fn normalizes_typedef_declarations_without_moving_source_ranges() {
+        let source = "typedef Player = { name: string? }\ntypedef List<T> = { T }";
+        let prepared = prepare(source);
+
+        assert!(prepared.text.contains("type    Player"));
+        assert!(
+            prepared.text.contains("type    List<T>"),
+            "{}",
+            prepared.text
+        );
+        for name in ["Player", "List"] {
+            let offset = prepared.text.find(name).unwrap();
+            assert_eq!(prepared.original_offset(offset), source.find(name).unwrap());
+        }
+    }
+
+    #[test]
+    fn normalizes_typedef_with_nested_optional_callback_fields() {
+        let source = "typedef Api = { new: (options: { extend?: (d: number) -> any }) -> any }";
+        let prepared = prepare(source);
+        assert!(
+            full_moon::parse_fallible(&prepared.text, full_moon::LuaVersion::cfxlua().with_luau())
+                .errors()
+                .is_empty(),
+            "{}",
+            prepared.text
+        );
+        let offset = prepared.text.find("extend").unwrap();
+        assert_eq!(
+            prepared.original_offset(offset),
+            source.find("extend").unwrap()
+        );
+        assert!(invalid_type_alias_error(&source.replacen("typedef", "type", 1)).is_some());
+    }
+
+    #[test]
+    fn does_not_treat_a_line_broken_type_call_as_a_type_alias() {
+        assert!(invalid_type_alias_error("local f = type\nx = 1").is_none());
+        assert!(invalid_type_alias_error("type Player = { name: string }").is_some());
+        assert!(invalid_type_alias_error("type\nPlayer = { name: string }").is_some());
+        assert!(invalid_type_alias_error("function f() type Player = number end").is_some());
+        assert!(invalid_type_alias_error("local export = true\ntypedef Player = number").is_none());
+        assert!(
+            prepare("function f() typedef Player = number end")
+                .text
+                .contains("function f() type    Player = number end")
+        );
+    }
 
     #[test]
     fn expands_template_interpolation_without_dollar_prefix() {
@@ -514,8 +723,8 @@ mod tests {
     #[test]
     fn maps_offsets_after_expanding_templates_to_the_original_source() {
         for source in [
-            "type P = { name: string }\nlocal text = `hello {name}`\nlocal bad: P = {}\n-- trailing comment",
-            "type P = { name: string, maybe?: number }\nlocal a = `ü {name}`\nlocal b = `value ${name}`\nlocal fallback = item ?? nil\nlocal bad: P = {}\n-- tail",
+            "typedef P = { name: string }\nlocal text = `hello {name}`\nlocal bad: P = {}\n-- trailing comment",
+            "typedef P = { name: string, maybe?: number }\nlocal a = `ü {name}`\nlocal b = `value ${name}`\nlocal fallback = item ?? nil\nlocal bad: P = {}\n-- tail",
         ] {
             let (expanded, template_offsets) = expand_templates(source);
             assert_eq!(template_offsets.len(), expanded.len() + 1);
@@ -525,6 +734,23 @@ mod tests {
 
             assert_eq!(prepared.original_offset(prepared_record), original_record);
         }
+    }
+
+    #[test]
+    fn maps_coalescing_offsets_after_expanding_templates() {
+        let source = "local text = `hello {name}`\nlocal value = a??b";
+        let prepared = prepare(source);
+        let operator = prepared.coalesce_operators.iter().next().unwrap();
+        assert_eq!(
+            prepared.original_offset(*operator),
+            source.find("??").unwrap()
+        );
+        assert_eq!(
+            prepared.original_offset(*operator + 2),
+            source.find("??").unwrap() + 2
+        );
+        let right = prepared.text.rfind('b').unwrap();
+        assert_eq!(prepared.original_offset(right), source.rfind('b').unwrap());
     }
 
     #[test]
