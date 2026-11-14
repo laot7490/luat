@@ -151,7 +151,7 @@ pub(super) fn infer_literal_type(expression: &str) -> Option<&'static str> {
         "true" | "false" => Some("boolean"),
         _ if expression.starts_with(['\'', '"']) => Some("string"),
         _ if expression.starts_with('{') => Some("table"),
-        _ if expression.parse::<i64>().is_ok() => Some("integer"),
+        _ if expression.parse::<i64>().is_ok() => Some("number"),
         _ if expression.parse::<f64>().is_ok() => Some("number"),
         _ if expression.starts_with("function") => Some("function"),
         _ => None,
@@ -176,9 +176,16 @@ pub(super) fn is_assignable(
     let expected = expected.trim();
     let expected = strip_wrapping_parentheses(expected);
     let actual = actual.trim();
-    if invalid_generic_arity(actual, aliases) || invalid_generic_arity(expected, aliases) {
-        return Some(false);
-    }
+    let actual_owned;
+    let actual = if let Some(inner) = actual
+        .strip_suffix('?')
+        .filter(|_| split_once_top_level(actual, '-').is_none())
+    {
+        actual_owned = format!("{inner} | nil");
+        actual_owned.as_str()
+    } else {
+        actual
+    };
     let actual_union = split_union(actual);
     if actual_union.len() > 1 {
         let mut uncertain = false;
@@ -190,6 +197,21 @@ pub(super) fn is_assignable(
             }
         }
         return if uncertain { None } else { Some(true) };
+    }
+    if let Some(inner) = expected
+        .strip_suffix('?')
+        .filter(|_| split_once_top_level(expected, '-').is_none())
+    {
+        return if actual == "nil" {
+            Some(true)
+        } else {
+            is_assignable(actual, inner, aliases, seen)
+        };
+    }
+    if split_union(expected).len() == 1
+        && (invalid_generic_arity(actual, aliases) || invalid_generic_arity(expected, aliases))
+    {
+        return Some(false);
     }
     if let Some(actual_vector) = vector_dimension(actual, aliases)
         && let Some(expected_vector) = vector_dimension(expected, aliases)
@@ -322,12 +344,8 @@ pub(super) fn is_assignable(
         seen.push(name.to_owned());
         return is_assignable(actual, &alias, aliases, seen);
     }
-    if let Some(inner) = expected.strip_suffix('?') {
-        return if actual == "nil" {
-            Some(true)
-        } else {
-            is_assignable(actual, inner, aliases, seen)
-        };
+    if actual == "nil" && parse_function_type(expected).is_some() {
+        return Some(false);
     }
     None
 }

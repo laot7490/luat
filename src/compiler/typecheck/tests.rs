@@ -925,7 +925,7 @@ fn module_exports_union_only_top_level_return_types() {
     let imports = HashMap::new();
     assert_eq!(
         super::infer_module_export_type("if true then return 1 else return 'text' end", &imports,),
-        "'text' | integer"
+        "'text' | number"
     );
     assert_eq!(
         super::infer_module_export_type(
@@ -1424,4 +1424,95 @@ fn parallel_local_initializers_use_the_outer_scope() {
 fn type_alias_shadowing_is_restored_after_nested_blocks() {
     let source = "typedef Value = string\ndo\n typedef Value = number\n local inner: Value = 1\nend\nlocal outer: Value = 'text'";
     assert!(crate::compile_source(source).is_ok());
+}
+
+#[test]
+fn number_unification_and_computed_array_indices() {
+    for source in [
+        "local count: integer = 1.5\nlocal value: number = count",
+        "typedef Player = { name: string }\nlocal players: { Player } = {}\nplayers[#players + 1] = { name = 'Ada' }",
+        "typedef Handler<T> = (value: T) -> boolean\nlocal handlers: { Handler<number> } = {}\nfor _, handler in ipairs(handlers) do handler(1) end",
+    ] {
+        let result = crate::compile_source(source);
+        assert!(
+            result.is_ok(),
+            "{source}\n{result:?}\nprepared: {}",
+            prepare(source).text
+        );
+    }
+}
+
+#[test]
+fn dynamic_record_reads_are_optional_and_writes_stay_checked() {
+    let source = "local jobs = { police = true, medic = false }\nlocal job: string = 'other'\nlocal allowed: boolean? = jobs[job]";
+    let result = crate::compile_source(source);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(crate::compile_source(&source.replace("boolean?", "boolean")).is_err());
+    assert!(crate::compile_source(&format!("{source}\njobs[job] = true")).is_err());
+    assert!(
+        crate::compile_source("local jobs = { police = true }\nlocal value = jobs['typo']")
+            .is_err()
+    );
+}
+
+#[test]
+fn nil_guards_narrow_only_the_reachable_branch() {
+    let source = "typedef Player = { name: string }\nlocal function take(name: string) end\nlocal function use(player: Player?)\n if player == nil or player.name == '' then return end\n take(player.name)\nend";
+    let result = crate::compile_source(source);
+    assert!(result.is_ok(), "{result:?}");
+    let guarded = "typedef Player = { name: string }\nlocal function take(name: string) end\nlocal function use(player: Player?)\n if player ~= nil then take(player.name) end\nend";
+    assert!(crate::compile_source(guarded).is_ok());
+    assert!(
+        crate::compile_source(&guarded.replace(
+            "take(player.name) end",
+            "player = nil\n take(player.name) end"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn postfix_arrays_share_existing_type_checks() {
+    for source in [
+        "typedef Player = { name: string }\nlocal players: Player[] = {}\nplayers[#players + 1] = { name = 'Ada' }",
+        "typedef List<T> = T[]\nlocal values: List<number[]> = { { 1, 2 } }",
+        "local values: (number | nil)[] = { 1 }\nlocal matrix: number[][] = { { 1 } }\nlocal maybe: number[]? = nil",
+        "local callbacks: (() -> number)[] = {}\nlocal function values(): number[] return { 1 } end",
+    ] {
+        let result = crate::compile_source(source);
+        assert!(
+            result.is_ok(),
+            "{source}\n{result:?}\nprepared: {}",
+            prepare(source).text
+        );
+    }
+    assert!(crate::compile_source("local values: number[] = { 'bad' }").is_err());
+    assert!(crate::compile_source("local values: number[ = {}").is_err());
+}
+
+#[test]
+fn optional_callbacks_generics_and_shadowed_guards() {
+    assert!(crate::compile_source("local callback: () -> number? = nil").is_err());
+    assert!(
+        crate::compile_source("typedef Box<T> = { value: T }\nlocal box: Box<number>? = nil")
+            .is_ok()
+    );
+    let source = "typedef Player = { name: string }\nlocal function take(value: string) end\nlocal function use(p: Player?)\n if p then\n local p: Player? = nil\n take(p.name)\n end\nend";
+    assert!(crate::compile_source(source).is_err());
+}
+
+#[test]
+fn postfix_ranges_and_numeric_compatibility_preserve_source_text() {
+    let source =
+        "-- Türkçe integer[]\nlocal text = 'integer[]'\nlocal values: number[] = { 'bad' }";
+    let error = crate::compile_source(source).unwrap_err();
+    assert_eq!(&source[error.diagnostics[0].source_range.clone()], "'bad'");
+    let source = "local fields: { integer: number, kind: 'integer' } = { integer = 1, kind = 'integer' }\nlocal value: integer = 1.5";
+    let result = crate::compile_source(source);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(super::display_type("{ { number } }"), "number[][]");
+    assert_eq!(
+        super::display_type("{ name: string, values: { number } }"),
+        "{ name: string, values: number[] }"
+    );
 }

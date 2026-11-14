@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::{CompileError, Diagnostic};
 use full_moon::{
     LuaVersion,
-    ast::luau::{ExportedTypeDeclaration, TypeDeclaration, TypeField, TypeFieldKey},
+    ast::luau::{ExportedTypeDeclaration, TypeDeclaration, TypeField, TypeFieldKey, TypeInfo},
     node::Node,
     tokenizer::{Lexer, LexerResult, Symbol, Token, TokenType},
     visitors::Visitor,
@@ -28,10 +28,12 @@ impl PreparedSource {
 pub(crate) fn prepare(source: &str) -> PreparedSource {
     let (expanded, template_offsets) = expand_templates(source);
     let typedefs = normalize_typedef_declarations(&expanded);
-    let (normalized, normalized_offsets) = normalize_optional_fields(&typedefs);
+    let (arrays, array_offsets) = normalize_type_syntax(&typedefs, true);
+    let (optional, optional_offsets) = normalize_optional_fields(&arrays);
+    let (normalized, normalized_offsets) = normalize_type_syntax(&optional, false);
     let source_offsets = normalized_offsets
         .into_iter()
-        .map(|offset| template_offsets[offset])
+        .map(|offset| template_offsets[array_offsets[optional_offsets[offset]]])
         .collect::<Vec<_>>();
     let source = normalized.as_str();
     let version = LuaVersion::cfxlua().with_luau();
@@ -94,7 +96,129 @@ pub(crate) fn prepare(source: &str) -> PreparedSource {
     prepared
 }
 
+#[derive(Default)]
+struct TypeRanges {
+    types: Vec<(usize, usize)>,
+    integers: Vec<(usize, usize)>,
+}
+
+impl Visitor for TypeRanges {
+    fn visit_type_info(&mut self, node: &TypeInfo) {
+        let Some(range) = node
+            .tokens()
+            .fold(None, |range: Option<(usize, usize)>, token| {
+                let start = token.token().start_position().bytes();
+                let end = token.token().end_position().bytes();
+                Some(range.map_or((start, end), |(a, b)| (a.min(start), b.max(end))))
+            })
+        else {
+            return;
+        };
+        self.types.push(range);
+        if matches!(node, TypeInfo::Basic(token) if token.token().to_string() == "integer") {
+            self.integers.push(range);
+        }
+    }
+}
+
+fn replace_mapped(
+    text: &mut String,
+    offsets: &mut Vec<usize>,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) {
+    let anchor = offsets[start];
+    let finish = offsets[end];
+    text.replace_range(start..end, replacement);
+    let mut mapping = vec![anchor; replacement.len()];
+    if let Some(last) = mapping.last_mut() {
+        *last = finish;
+    }
+    offsets.splice(start + 1..end + 1, mapping);
+}
+
+fn normalize_type_syntax(source: &str, arrays: bool) -> (String, Vec<usize>) {
+    if (arrays
+        && !source.match_indices('[').any(|(offset, _)| {
+            let next = source[offset + 1..].trim_start();
+            next.starts_with(']') || next.starts_with("--") || next.starts_with("/*")
+        }))
+        || (!arrays && !source.contains("integer"))
+    {
+        return (source.to_owned(), (0..=source.len()).collect());
+    }
+    let mut text = source.to_owned();
+    let mut offsets = (0..=source.len()).collect::<Vec<_>>();
+    loop {
+        let tokens = significant_tokens(&text);
+        if !arrays && !tokens.iter().any(|token| matches!(token.token_type(), TokenType::Identifier { identifier } if identifier.to_string() == "integer")) { break; }
+        let candidates = tokens
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, pair)| {
+                (pair[0].to_string() == "[" && pair[1].to_string() == "]" && index > 0).then(|| {
+                    (
+                        tokens[index - 1].end_position().bytes(),
+                        pair[0].start_position().bytes(),
+                        pair[1].end_position().bytes(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if arrays && candidates.is_empty() {
+            break;
+        }
+        let mut masked = text.as_bytes().to_vec();
+        if arrays {
+            for &(_, start, end) in &candidates {
+                for byte in &mut masked[start..end] {
+                    if !matches!(*byte, b'\r' | b'\n') {
+                        *byte = b' ';
+                    }
+                }
+            }
+            for offset in optional_field_markers(&tokens) {
+                masked[offset] = b' ';
+            }
+        }
+        let parsed = full_moon::parse_fallible(
+            &String::from_utf8(masked).unwrap(),
+            LuaVersion::cfxlua().with_luau(),
+        );
+        let mut ranges = TypeRanges::default();
+        ranges.visit_ast(&parsed.into_ast());
+        if !arrays {
+            ranges.integers.sort_unstable();
+            ranges.integers.dedup();
+            for (start, end) in ranges.integers.into_iter().rev() {
+                replace_mapped(&mut text, &mut offsets, start, end, "number");
+            }
+            break;
+        }
+        let next = candidates.into_iter().find_map(|(previous, start, end)| {
+            ranges
+                .types
+                .iter()
+                .filter(|(_, finish)| *finish == previous)
+                .max_by_key(|(begin, _)| begin)
+                .map(|(begin, _)| (*begin, start, end))
+        });
+        let Some((begin, start, end)) = next else {
+            break;
+        };
+        // Keep trivia between the brackets, including comments and line breaks.
+        replace_mapped(&mut text, &mut offsets, end - 1, end, "}");
+        replace_mapped(&mut text, &mut offsets, start, start + 1, " ");
+        replace_mapped(&mut text, &mut offsets, begin, begin, "{");
+    }
+    (text, offsets)
+}
+
 fn normalize_typedef_declarations(source: &str) -> String {
+    if !source.contains("typedef") {
+        return source.to_owned();
+    }
     let declarations = type_alias_keyword_spans(source, "typedef");
     if declarations.is_empty() {
         return source.to_owned();
@@ -203,6 +327,9 @@ fn significant_tokens(source: &str) -> Vec<Token> {
 }
 
 pub(crate) fn invalid_type_alias_error(source: &str) -> Option<CompileError> {
+    if !source.contains("type") {
+        return None;
+    }
     let mut diagnostics = type_alias_keyword_spans(source, "type")
         .into_iter()
         .map(|(start, end)| {

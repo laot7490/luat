@@ -6,6 +6,106 @@ mod lower;
 pub(crate) mod syntax;
 pub(crate) mod typecheck;
 
+#[derive(Clone)]
+pub(crate) struct ParsedSource {
+    pub source: String,
+    pub prepared: syntax::PreparedSource,
+    pub ast: full_moon::ast::Ast,
+    pub diagnostics: Vec<Diagnostic>,
+    pub syntax_valid: bool,
+    pub exports: std::sync::Arc<std::sync::Mutex<Option<(Vec<(String, String)>, String)>>>,
+    pub imports:
+        std::sync::Arc<std::sync::OnceLock<Result<Vec<imports::ImportCall>, CompileError>>>,
+}
+
+impl ParsedSource {
+    pub fn new_prepared(source: &str, prepared: syntax::PreparedSource) -> Self {
+        let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
+        let syntax_valid = parsed.errors().is_empty();
+        let mut diagnostics = parser_diagnostics(parsed.errors(), "", source, |offset| {
+            prepared.original_offset(offset)
+        });
+        if let Some(error) = syntax::invalid_type_alias_error(source) {
+            diagnostics.extend(error.diagnostics);
+        }
+        Self {
+            source: source.to_owned(),
+            prepared,
+            ast: parsed.into_ast(),
+            diagnostics,
+            syntax_valid,
+            exports: Default::default(),
+            imports: Default::default(),
+        }
+    }
+
+    pub fn import_calls(&self) -> Result<Vec<imports::ImportCall>, CompileError> {
+        self.imports
+            .get_or_init(|| {
+                if !self.diagnostics.is_empty() {
+                    return Err(CompileError {
+                        diagnostics: self.diagnostics.clone(),
+                    });
+                }
+                imports::analyze(&self.source, &self.prepared, &self.ast, true)
+            })
+            .clone()
+    }
+
+    pub fn export_type(&self, imports: &std::collections::HashMap<String, String>) -> String {
+        let mut key = imports
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect::<Vec<_>>();
+        key.sort();
+        let mut cache = self.exports.lock().unwrap();
+        if let Some((cached_key, result)) = cache.as_ref()
+            && cached_key == &key
+        {
+            return result.clone();
+        }
+        let result = if !self.syntax_valid {
+            "any".into()
+        } else {
+            typecheck::infer_module_export_type_from_ast(
+                &self.source,
+                &self.prepared,
+                &self.ast,
+                imports,
+            )
+        };
+        *cache = Some((key, result.clone()));
+        result
+    }
+
+    pub fn check(
+        &self,
+        declarations: &DeclarationSet,
+        project_context: bool,
+        import_types: Option<&std::collections::HashMap<String, String>>,
+        context: Option<ExecutionContext>,
+    ) -> Result<(), CompileError> {
+        if !self.diagnostics.is_empty() {
+            return Err(CompileError {
+                diagnostics: self.diagnostics.clone(),
+            });
+        }
+        if project_context {
+            self.import_calls()?;
+        } else {
+            imports::analyze(&self.source, &self.prepared, &self.ast, false)?;
+        }
+        check_ast(
+            &self.source,
+            &self.prepared,
+            &self.ast,
+            declarations,
+            import_types,
+            context,
+        )
+    }
+}
+
 pub(crate) fn format_output(source: &str, generated: &str) -> Result<String, CompileError> {
     let config = stylua_lib::Config {
         syntax: stylua_lib::LuaVersion::CfxLua,
@@ -34,7 +134,7 @@ pub(crate) fn format_output(source: &str, generated: &str) -> Result<String, Com
 }
 
 use crate::{
-    ExecutionContext,
+    Diagnostic, ExecutionContext,
     diagnostic::{CompileError, parser_diagnostics},
 };
 use declarations::DeclarationSet;
@@ -42,10 +142,6 @@ use declarations::DeclarationSet;
 /// Checks LuaT source and returns CfxLua with type-only syntax removed.
 pub fn compile_source(source: &str) -> Result<String, CompileError> {
     compile_source_with_declarations(source, &[])
-}
-
-pub(crate) fn check_source_for_analysis(source: &str) -> Result<(), CompileError> {
-    check_project_source_with_set(source, &DeclarationSet::default(), false, None, None)
 }
 
 pub(crate) fn compile_source_with_declarations(
