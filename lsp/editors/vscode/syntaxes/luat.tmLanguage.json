@@ -26,9 +26,16 @@
 		},
 		{
 			"include": "#numbers"
+		},
+		{
+			"include": "#function-call"
 		}
 	],
 	"repository": {
+		"function-call": {
+			"name": "entity.name.function.luat",
+			"match": "\\b(?!(?:if|elseif|while|for|function|typedef|typeof)\\b)[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+		},
 		"function-signature": {
 			"begin": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_.:]*)\\s*(\\()",
 			"beginCaptures": {

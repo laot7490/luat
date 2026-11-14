@@ -260,9 +260,133 @@ enum TypeMismatchKind {
 
 type ActualTableField = (String, String, String, usize, usize, usize);
 
+#[derive(Default)]
+struct Flow {
+    functions: Vec<std::ops::Range<usize>>,
+    facts: Vec<(std::ops::Range<usize>, String)>,
+    blocks: Vec<usize>,
+}
+fn present(condition: &Expression, truth: bool) -> Vec<String> {
+    match condition {
+        Expression::Parentheses { expression, .. } => present(expression, truth),
+        Expression::BinaryOperator { lhs, binop, rhs } => {
+            let op = binop.token().to_string();
+            if (op.trim() == "and" && truth) || (op.trim() == "or" && !truth) {
+                let mut names = present(lhs, truth);
+                names.extend(present(rhs, truth));
+                return names;
+            }
+            if matches!(op.trim(), "==" | "~=") && ((op.trim() == "~=") == truth) {
+                let left = lhs.to_string();
+                let right = rhs.to_string();
+                let name = if right.trim() == "nil" {
+                    left.trim()
+                } else if left.trim() == "nil" {
+                    right.trim()
+                } else {
+                    ""
+                };
+                if is_identifier(name) {
+                    return vec![name.to_owned()];
+                }
+            }
+            Vec::new()
+        }
+        _ if truth && is_identifier(condition.to_string().trim()) => {
+            vec![condition.to_string().trim().to_owned()]
+        }
+        _ => Vec::new(),
+    }
+}
+impl Flow {
+    fn collect(ast: &ast::Ast) -> Self {
+        let mut flow = Self::default();
+        flow.visit_ast(ast);
+        flow
+    }
+    fn add(&mut self, node: &impl Node, names: Vec<String>) {
+        if let (Some(a), Some(b)) = (node.start_position(), node.end_position()) {
+            self.facts
+                .extend(names.into_iter().map(|name| (a.bytes()..b.bytes(), name)));
+        }
+    }
+}
+impl Visitor for Flow {
+    fn visit_local_function(&mut self, node: &ast::LocalFunction) {
+        if let (Some(a), Some(b)) = (node.start_position(), node.end_position()) {
+            self.functions.push(a.bytes()..b.bytes());
+        }
+    }
+    fn visit_anonymous_function(&mut self, node: &ast::AnonymousFunction) {
+        if let (Some(a), Some(b)) = (node.start_position(), node.end_position()) {
+            self.functions.push(a.bytes()..b.bytes());
+        }
+    }
+    fn visit_function_declaration(&mut self, node: &ast::FunctionDeclaration) {
+        if let (Some(a), Some(b)) = (node.start_position(), node.end_position()) {
+            self.functions.push(a.bytes()..b.bytes());
+        }
+    }
+
+    fn visit_block(&mut self, node: &ast::Block) {
+        self.blocks
+            .push(node.end_position().map_or(0, |p| p.bytes()));
+    }
+    fn visit_block_end(&mut self, _: &ast::Block) {
+        self.blocks.pop();
+    }
+    fn visit_if(&mut self, node: &ast::If) {
+        self.add(node.block(), present(node.condition(), true));
+        let mut remaining = present(node.condition(), false);
+        if let Some(branches) = node.else_if() {
+            for branch in branches {
+                self.add(branch.condition(), remaining.clone());
+                let mut branch_facts = remaining.clone();
+                branch_facts.extend(present(branch.condition(), true));
+                self.add(branch.block(), branch_facts);
+                remaining.extend(present(branch.condition(), false));
+            }
+        }
+        if let Some(block) = node.else_block() {
+            self.add(block, remaining);
+        }
+        if node
+            .block()
+            .last_stmt()
+            .is_some_and(|stmt| matches!(stmt, ast::LastStmt::Return(_)))
+            && node.else_block().is_none()
+            && node.else_if().is_none()
+        {
+            let start = node.end_position().map_or(0, |p| p.bytes());
+            let end = self.blocks.last().copied().unwrap_or(start);
+            self.facts.extend(
+                present(node.condition(), false)
+                    .into_iter()
+                    .map(|name| (start..end, name)),
+            );
+        }
+    }
+    fn visit_expression(&mut self, node: &Expression) {
+        if let Expression::BinaryOperator { lhs, binop, rhs } = node {
+            let op = binop.token().to_string();
+            if matches!(op.trim(), "and" | "or") {
+                self.add(rhs.as_ref(), present(lhs, op.trim() == "and"));
+            }
+        }
+    }
+}
+
+struct PositionGuard<'a>(&'a std::cell::Cell<usize>, usize);
+impl Drop for PositionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.1);
+    }
+}
 struct TypeChecker<'a> {
     source: &'a str,
     prepared: &'a PreparedSource,
+    flow: Flow,
+    position: std::cell::Cell<usize>,
     import_types: Option<&'a HashMap<String, String>>,
     aliases: HashMap<String, TypeAlias>,
     alias_scope_changes: Vec<Vec<(String, Option<TypeAlias>)>>,
@@ -620,10 +744,39 @@ impl TypeChecker<'_> {
             .rev()
             .find_map(|scope| scope.get(expression))
         {
+            let point = self.position.get();
+            let refined =
+                self.flow.facts.iter().any(|(range, name)| {
+                    range.contains(&point)
+                        && name == expression
+                        && !self.flow.functions.iter().any(|function| {
+                            function.contains(&point) && function.start > range.start
+                        })
+                });
+            if refined {
+                let (base, _) = resolve_optional_base_type(ty, &self.aliases);
+                return base;
+            }
             return ty.clone();
         }
         if let Some(ty) = self.global_types.get(expression) {
             return ty.clone();
+        }
+        let parsed = full_moon::parse_fallible(
+            &format!("local __luat_value = {expression}"),
+            LuaVersion::cfxlua().with_luau(),
+        );
+        if parsed.errors().is_empty() {
+            let mut collector = InitializerCollector::default();
+            collector.visit_ast(&parsed.into_ast());
+            if let Some(
+                node @ (Expression::BinaryOperator { .. }
+                | Expression::UnaryOperator { .. }
+                | Expression::TypeAssertion { .. }),
+            ) = collector.expression
+            {
+                return self.infer_ast_expression_type(&node);
+            }
         }
         if let Some((receiver, key)) = split_index_access(expression) {
             return self
@@ -665,7 +818,7 @@ impl TypeChecker<'_> {
             if let Some(signature) = self.functions.get(name) {
                 return vec![signature.clone()];
             }
-            return parse_function_type(scoped).into_iter().collect();
+            return parse_function_signatures(scoped, &self.aliases);
         }
         let field_access = split_known_field_access(name);
         if let Some(signature) = self.functions.get(name) {
@@ -755,6 +908,18 @@ impl TypeChecker<'_> {
     }
 
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
+        let previous = self.position.get();
+        let _position = PositionGuard(&self.position, previous);
+        if let (Some(start), Some(end)) = (expression.start_position(), expression.end_position())
+            && self
+                .prepared
+                .text
+                .get(start.bytes()..end.bytes())
+                .is_some_and(|text| text.trim() == expression.to_string().trim())
+        {
+            self.position.set(start.bytes());
+        }
+
         match expression {
             Expression::Function(function) => {
                 let mut collector = FunctionCollector::default();
@@ -849,7 +1014,10 @@ impl TypeChecker<'_> {
                     members.dedup();
                     return members.join(" | ");
                 }
-                self.infer_expression_type(&expression.to_string())
+                "any".to_owned()
+            }
+            Expression::Parentheses { expression, .. } => {
+                self.infer_ast_expression_type(expression)
             }
             Expression::UnaryOperator { unop, expression } => match unop.to_string().trim() {
                 "not" => "boolean".to_owned(),
@@ -968,7 +1136,7 @@ impl TypeChecker<'_> {
     }
 
     fn infer_index_type(&self, receiver: &str, key: &str) -> Option<String> {
-        let types = self.infer_index_types(receiver, key)?;
+        let types = self.infer_index_types(receiver, key, false)?;
         let mut inferred = types.join(" | ");
         let (_, optional) =
             resolve_optional_base_type(&self.infer_expression_type(receiver), &self.aliases);
@@ -979,7 +1147,7 @@ impl TypeChecker<'_> {
     }
 
     fn infer_index_write_type(&self, receiver: &str, key: &str) -> Option<String> {
-        let mut types = self.infer_index_types(receiver, key)?;
+        let mut types = self.infer_index_types(receiver, key, true)?;
         let mut seen = HashSet::new();
         types.retain(|ty| seen.insert(ty.clone()));
         Some(if types.len() == 1 {
@@ -993,7 +1161,7 @@ impl TypeChecker<'_> {
         })
     }
 
-    fn infer_index_types(&self, receiver: &str, key: &str) -> Option<Vec<String>> {
+    fn infer_index_types(&self, receiver: &str, key: &str, write: bool) -> Option<Vec<String>> {
         let receiver_type = self.infer_expression_type(receiver);
         let (definition, _) = resolve_optional_base_type(&receiver_type, &self.aliases);
         let body = definition.trim().strip_prefix('{')?.strip_suffix('}')?;
@@ -1029,7 +1197,7 @@ impl TypeChecker<'_> {
                 .then(|| vec![parts[0].trim().to_owned()]);
         }
 
-        for part in parts {
+        for part in &parts {
             let Some((name, value_type)) = split_once_top_level(part, ':') else {
                 continue;
             };
@@ -1048,6 +1216,21 @@ impl TypeChecker<'_> {
             ) == Some(true)
             {
                 return Some(vec![value_type.trim().to_owned()]);
+            }
+        }
+        if !write && key_type.trim() == "string" {
+            let mut values = parts
+                .iter()
+                .filter_map(|part| {
+                    let (name, value) = split_once_top_level(part, ':')?;
+                    (!name.trim().starts_with('[')).then(|| value.trim().to_owned())
+                })
+                .collect::<Vec<_>>();
+            if !values.is_empty() {
+                values.push("nil".to_owned());
+                values.sort();
+                values.dedup();
+                return Some(vec![values.join(" | ")]);
             }
         }
         None
@@ -1189,6 +1372,8 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_const_assignment(&mut self, node: &ast::luau::ConstAssignment) {
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         let expressions: Vec<_> = node.expressions().iter().cloned().collect();
         let (values, _) = self.expression_list_values(&expressions, node.names().len());
         let mut bindings = HashMap::new();
@@ -1457,6 +1642,8 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_return(&mut self, node: &ast::Return) {
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         if self.function_names.is_empty() {
             self.module_returns.push(
                 node.returns()
@@ -1570,6 +1757,8 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_function_call(&mut self, node: &ast::FunctionCall) {
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         let suffixes = node.suffixes().collect::<Vec<_>>();
         let Some((last, suffix)) = suffixes.iter().enumerate().next_back() else {
             return;
@@ -1854,6 +2043,8 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_var_expression(&mut self, node: &ast::VarExpression) {
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         let mut receiver = node.prefix().to_string();
         for suffix in node.suffixes() {
             match suffix {
@@ -1899,8 +2090,9 @@ impl Visitor for TypeChecker<'_> {
                             self.prepared.original_offset(end.bytes()),
                             "LT2005",
                             format!(
-                                "Type '{}' has no field '{key}' in expression '{receiver}[{key}]'.",
+                                "Type '{}' cannot be indexed by expression '{key}' of type '{}'.",
                                 self.infer_expression_type(&receiver),
+                                self.infer_expression_type(&key),
                             ),
                         ));
                         break;
@@ -1913,6 +2105,17 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_local_assignment(&mut self, node: &ast::LocalAssignment) {
+        let end = node.end_position().map_or(0, |p| p.bytes());
+        for name in node.names() {
+            for (range, variable) in &mut self.flow.facts {
+                if variable == &name.token().to_string() && range.start < end {
+                    range.end = range.end.min(end);
+                }
+            }
+        }
+
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         let signatures = node
             .names()
             .iter()
@@ -2015,6 +2218,17 @@ impl Visitor for TypeChecker<'_> {
     }
 
     fn visit_assignment(&mut self, node: &ast::Assignment) {
+        for target in node.variables() {
+            let name = target.to_string();
+            let end = node.end_position().map_or(0, |p| p.bytes());
+            for (range, variable) in &mut self.flow.facts {
+                if variable == name.trim() && range.start < end {
+                    range.end = range.end.min(end);
+                }
+            }
+        }
+        self.position
+            .set(node.start_position().map_or(0, |p| p.bytes()));
         let expressions: Vec<_> = node.expressions().iter().cloned().collect();
         let (values, _) = self.expression_list_values(&expressions, node.variables().len());
         for (index, target) in node.variables().iter().enumerate() {
@@ -2051,6 +2265,23 @@ impl Visitor for TypeChecker<'_> {
                         .rev()
                         .find_map(|scope| scope.get(target_name).cloned())
                 });
+            if expected.is_none()
+                && let Some((receiver, key)) = split_index_access(target_name)
+                && self.is_known_record(receiver)
+            {
+                let byte = target.start_position().map_or(0, |p| p.bytes());
+                self.diagnostics.push(Diagnostic::at(
+                    self.source,
+                    self.prepared.original_offset(byte),
+                    target_name.chars().count(),
+                    "LT2005",
+                    format!(
+                        "Cannot write through index '{key}' of type '{}' on '{}'.",
+                        self.infer_expression_type(key),
+                        self.infer_expression_type(receiver)
+                    ),
+                ));
+            }
             if let (Some(value), Some(expected)) = (value, expected.as_deref()) {
                 let errors = self.if_branch_error(value, expected, "LT2001");
                 if !errors.is_empty() {
@@ -2335,8 +2566,10 @@ fn generic_bindings(
     let mut bindings = GenericBindings::default();
     for (expected, argument) in signature.parameters.iter().zip(arguments) {
         let actual = checker.infer_expression_type(argument);
+        let expected =
+            resolve_alias_chain(expected, &checker.aliases).unwrap_or_else(|| expected.clone());
         bind_generic_type(
-            expected,
+            &expected,
             &actual,
             &signature.generic_parameters,
             &mut bindings.types,
@@ -2359,6 +2592,15 @@ fn bind_generic_type(
         .and_then(|value| value.strip_suffix(')'))
         .unwrap_or(expected);
     let actual = actual.trim();
+    if let (Some(expected), Some(actual)) = (
+        expected.strip_prefix('{').and_then(|s| s.strip_suffix('}')),
+        actual.strip_prefix('{').and_then(|s| s.strip_suffix('}')),
+    ) && split_once_top_level(expected, ':').is_none()
+        && split_once_top_level(actual, ':').is_none()
+    {
+        bind_generic_type(expected, actual, parameters, bindings, conflicts);
+        return;
+    }
     if actual == "any" {
         return;
     }
@@ -2853,7 +3095,7 @@ fn check_array_item(
             } else {
                 Err(vec![TypeMismatch {
                     field_path: Vec::new(),
-                    range: 0..value.len(),
+                    range: 0..value.trim_end().len(),
                     kind: TypeMismatchKind::IncompatibleType {
                         actual: actual_type,
                         expected: expected.to_owned(),
@@ -3461,6 +3703,8 @@ pub(crate) fn check_with_imports(
     }
 
     let mut checker = TypeChecker {
+        flow: Flow::collect(ast),
+        position: std::cell::Cell::new(0),
         source,
         prepared,
         import_types,
@@ -3589,14 +3833,25 @@ pub(crate) fn infer_module_export_type(
         return "any".to_owned();
     }
     let ast = parsed.into_ast();
+    infer_module_export_type_from_ast(source, &prepared, &ast, import_types)
+}
+
+pub(crate) fn infer_module_export_type_from_ast(
+    source: &str,
+    prepared: &PreparedSource,
+    ast: &ast::Ast,
+    import_types: &HashMap<String, String>,
+) -> String {
     let mut aliases = AliasCollector::default();
-    aliases.visit_ast(&ast);
+    aliases.visit_ast(ast);
     let mut functions = FunctionCollector::default();
     functions.add_vector_constructors();
-    functions.visit_ast(&ast);
+    functions.visit_ast(ast);
     let mut checker = TypeChecker {
+        flow: Flow::collect(ast),
+        position: std::cell::Cell::new(0),
         source,
-        prepared: &prepared,
+        prepared,
         import_types: Some(import_types),
         aliases: aliases.aliases,
         alias_scope_changes: Vec::new(),
@@ -3615,7 +3870,7 @@ pub(crate) fn infer_module_export_type(
         pending_local_bindings: Vec::new(),
         diagnostics: Vec::new(),
     };
-    checker.visit_ast(&ast);
+    checker.visit_ast(ast);
     let mut types = checker
         .module_returns
         .into_iter()
@@ -3647,4 +3902,50 @@ pub(crate) fn editor_type_parts(ty: &str, separator: char) -> Vec<&str> {
 }
 pub(crate) fn editor_type_fields(ty: &str) -> Vec<&str> {
     split_top_level_by(ty, &[',', ';'])
+}
+
+pub(crate) fn display_type(input: &str) -> String {
+    fn render(input: &str, depth: usize) -> String {
+        if depth > 128 {
+            return input.to_owned();
+        }
+        let tokens = match full_moon::tokenizer::Lexer::new(input, LuaVersion::cfxlua().with_luau())
+            .collect()
+        {
+            full_moon::tokenizer::LexerResult::Ok(tokens)
+            | full_moon::tokenizer::LexerResult::Recovered(tokens, _) => tokens,
+            _ => return input.to_owned(),
+        };
+        let Some(open) = tokens
+            .iter()
+            .find(|t| t.to_string() == "{")
+            .map(|t| t.start_position().bytes())
+        else {
+            return input.to_owned();
+        };
+        let Some(close) = matching_delimiter(input, open, '{', '}') else {
+            return input.to_owned();
+        };
+        let body = &input[open + 1..close];
+        let inner = render(body, depth + 1);
+        let table = if !body.trim().is_empty()
+            && split_table_type_fields(body).len() == 1
+            && split_once_top_level(body, ':').is_none()
+        {
+            let inner = inner.trim();
+            if split_union(body).len() > 1 || split_once_top_level(body, '-').is_some() {
+                format!("({inner})[]")
+            } else {
+                format!("{inner}[]")
+            }
+        } else {
+            format!("{{{inner}}}")
+        };
+        format!(
+            "{}{table}{}",
+            &input[..open],
+            render(&input[close + 1..], depth + 1)
+        )
+    }
+    render(input, 0)
 }

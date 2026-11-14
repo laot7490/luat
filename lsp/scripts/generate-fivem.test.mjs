@@ -18,7 +18,7 @@ test('converts the documented AddAudioSubmixOutput example', () => {
 		'function AddAudioSubmixOutput(submixId, outputSubmixId) end',
 	].join('\n'));
 
-	assert.match(result.declarations, /function AddAudioSubmixOutput\(submixId: integer, outputSubmixId: integer\): \(\) end/);
+	assert.match(result.declarations, /function AddAudioSubmixOutput\(submixId: number, outputSubmixId: number\): \(\) end/);
 	assert.match(result.declarations, /---Adds an output for the specified audio submix\./);
 });
 
@@ -28,7 +28,7 @@ test('converts several return annotations to a value pack', () => {
 		'function getValue() end',
 	].join('\n'));
 
-	assert.match(result.declarations, /function getValue\(\): \(boolean, integer\) end/);
+	assert.match(result.declarations, /function getValue\(\): \(boolean, number\) end/);
 });
 
 test('converts optional callbacks into optional callable types', () => {
@@ -47,7 +47,7 @@ test('keeps declared aliases and uses them in signatures', () => {
 		'function getPed(ped) end',
 	].join('\n'));
 
-	assert.match(result.declarations, /typedef PedId = integer/);
+	assert.match(result.declarations, /typedef PedId = number/);
 	assert.match(result.declarations, /ped: PedId/);
 });
 
@@ -102,8 +102,8 @@ test('converts documented alias unions and overload annotations', () => {
 	].join('\n'));
 
 	assert.match(result.declarations, /typedef Mode = 'one' \| 'two'/);
-	assert.match(result.declarations, /function parse\(value: integer\): string end/);
-	assert.match(result.declarations, /function parse\(value: Mode\): integer end/);
+	assert.match(result.declarations, /function parse\(value: number\): string end/);
+	assert.match(result.declarations, /function parse\(value: Mode\): number end/);
 });
 
 test('fails on annotations whose types cannot be represented', () => {

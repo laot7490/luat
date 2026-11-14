@@ -197,7 +197,7 @@ impl AnalysisSnapshot {
         offset: usize,
     ) -> Option<SignatureInformation> {
         let file = self.files.get(path)?;
-        let range = identifier_range_at(&file.source, offset)?;
+        let range = file.identifier_range_at(offset)?;
         let before = file.source[..range.start].trim_end();
         let separator = before.chars().last()?;
         if !matches!(separator, '.' | ':') {
@@ -443,7 +443,7 @@ impl AnalysisSnapshot {
             }
         }
         if parameter_names {
-            let tokens = lex(&file.prepared.text);
+            let tokens = &file.tokens;
             for (open, token) in tokens.iter().enumerate() {
                 if token.to_string().trim() != "("
                     || open == 0
@@ -460,6 +460,13 @@ impl AnalysisSnapshot {
                     .iter()
                     .any(|d| d.selection.contains(&name_offset))
                 {
+                    continue;
+                }
+                let call_offset = file.prepared.original_offset(token.end_position().bytes());
+                let Some(help) = self.signature_help(path, call_offset) else {
+                    continue;
+                };
+                if help.signatures.len() != 1 {
                     continue;
                 }
                 let mut nesting = 0usize;
@@ -481,8 +488,6 @@ impl AnalysisSnapshot {
                         .original_offset(token.start_position().bytes());
                     if start && !text.is_empty() {
                         if range.contains(&offset)
-                            && let Some(help) = self.signature_help(path, offset)
-                            && help.signatures.len() == 1
                             && let Some(parameter) = help.signatures[0].parameters.get(argument)
                         {
                             let name = parameter

@@ -67,11 +67,6 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: target/release-tools
-          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -89,7 +84,7 @@ jobs:
       - name: Inspect and prepare platform packages
         run: |
           set -euo pipefail
-          node target/release-tools/scripts/release.mjs validate
+          node scripts/release.mjs validate
           mkdir -p target/release-prepared/assets
           for platform in win32-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
             executable=luat-lsp
@@ -97,11 +92,11 @@ jobs:
             binary="target/release-binaries/lsp-binary-$platform/$executable"
             test -s "$binary"
             file "$binary"
-            node target/release-tools/scripts/package-lsp.mjs "$platform" "$binary" target/release-prepared/assets
+            node scripts/package-lsp.mjs "$platform" "$binary" target/release-prepared/assets
             tar -tzf "target/release-prepared/assets/luat-lsp-$platform.tar.gz"
           done
-          node target/release-tools/scripts/release.mjs notes
-          node target/release-tools/scripts/release.mjs manifest
+          node scripts/release.mjs notes
+          node scripts/release.mjs manifest
           (cd target/release-prepared/assets && sha256sum --check SHA256SUMS)
       - uses: actions/upload-artifact@v6
         with:
@@ -162,11 +157,6 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: target/release-tools
-          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -178,5 +168,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          node target/release-tools/scripts/release.mjs validate
-          node target/release-tools/scripts/release.mjs publish
+          node scripts/release.mjs validate
+          node scripts/release.mjs publish

@@ -128,8 +128,7 @@ fn old_alias_declarations_report_syntax_errors_in_lsp_diagnostics() {
 #[test]
 fn server_standard_library_is_hidden_from_client_contexts() {
     let (mut snapshot, path) = analyze("os.clock()\nprint(1)\nos.");
-    snapshot
-        .contexts
+    Arc::make_mut(&mut snapshot.contexts)
         .insert(path.clone(), vec![crate::ExecutionContext::Client]);
     assert!(snapshot.hover(&path, 3).is_none());
     assert!(
@@ -143,8 +142,7 @@ fn server_standard_library_is_hidden_from_client_contexts() {
             .completions(&path, snapshot.source(&path).unwrap().len())
             .is_empty()
     );
-    snapshot
-        .contexts
+    Arc::make_mut(&mut snapshot.contexts)
         .insert(path.clone(), vec![crate::ExecutionContext::Server]);
     assert!(snapshot.hover(&path, 3).is_some());
     assert!(
@@ -450,7 +448,7 @@ fn review_regressions_preserve_method_receiver_and_callback_parameters() {
     let help = snapshot.signature_help(&path, source.len()).unwrap();
     assert_eq!(
         help.signatures[0].parameters,
-        ["whence: string?", "offset: integer?"]
+        ["whence: string?", "offset: number?"]
     );
     let source = "local x: { run: ((number) -> string, number) -> boolean }\nx.run(";
     let (snapshot, path) = analyze(source);

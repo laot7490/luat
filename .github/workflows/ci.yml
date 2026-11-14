@@ -28,11 +28,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha || github.sha }}
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: target/release-tools
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -46,12 +41,12 @@ jobs:
       - name: Check independent package versions
         run: |
           node --input-type=module <<'NODE'
-          import { checkVersions } from './target/release-tools/scripts/sync-versions.mjs';
+          import { checkVersions } from './scripts/sync-versions.mjs';
           await checkVersions(process.cwd(), 'cli');
           await checkVersions(process.cwd(), 'lsp');
           NODE
-      - name: Test release and version scripts
-        run: node --test target/release-tools/scripts/*.test.mjs lsp/scripts/*.test.mjs
+      - name: Test LSP scripts
+        run: node --test lsp/scripts/*.test.mjs
       - name: Check and build a sample CLI project
         run: |
           mkdir -p target/tests/ci-smoke/src/client
@@ -68,11 +63,6 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_sha || github.sha }}
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: target/release-tools
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v5
@@ -91,4 +81,4 @@ jobs:
         run: mkdir -p ../../../target/tests && xvfb-run -a npm test
         working-directory: lsp/editors/vscode
       - name: Package and inspect Linux VSIX
-        run: node target/release-tools/scripts/package-lsp.mjs linux-x64 target/debug/luat-lsp target/tests/ci-vsix
+        run: node scripts/package-lsp.mjs linux-x64 target/debug/luat-lsp target/tests/ci-vsix

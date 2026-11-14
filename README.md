@@ -66,7 +66,7 @@ LuaT reads project settings from `luat.toml`. The settings describe the resource
 
 LuaT supports type annotations and a few concise ways to write common Lua expressions:
 
-```lua
+````lua
 typedef Job = 'police' | 'medic'
 typedef Player = { name: string, job: Job, callsign?: string }
 
@@ -83,10 +83,6 @@ const status = if player.job == 'police' then 'On duty' else 'Available'
 -- Input: insert values into a string.
 local message = `Welcome, {name}! You are {status}.`
 -- Output: 'Welcome, Ada! You are On duty.'
-```
-
-`?.` safely accesses a property when the value before it may be `nil`. `??` uses its fallback only when the value on the left is `nil`.
-`const` prevents reassignment of the variable; table fields such as `player.name` can still be changed.
 
 ## Local imports
 
@@ -95,7 +91,7 @@ Use `import()` to share a local `.luat` module. For example, a module can return
 ```lua
 -- src/shared/settings.luat
 return { greeting = 'Hello' }
-```
+````
 
 Another script can import and use them:
 

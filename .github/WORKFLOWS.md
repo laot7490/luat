@@ -44,6 +44,6 @@ npm, the Visual Studio Marketplace, and GitHub cannot publish atomically. If pub
 
 ## Repository setup
 
-Configure npm Trusted Publishing for all six CLI packages and Visual Studio Marketplace Trusted Publishing for publisher `luat`, repository `laot7490/luat`, and this repository's top-level `release.yml` workflow. Leave the Marketplace environment blank unless the workflow is configured to use one. Publishing jobs request OIDC permission; no npm or VSCE token secret is needed. The workflow pins npm 11.6.2 and Node 22.
+Configure npm Trusted Publishing for all six CLI packages and Visual Studio Marketplace Trusted Publishing for publisher `luat`, repository `laot7490/luat`, and this repository's top-level `release.yml` workflow. Leave the Marketplace environment blank unless the workflow is configured to use one. Publishing jobs request OIDC permission; no npm or VSCE token secret is needed. The workflows use Node 24, and CLI publishing pins npm 11.6.2.
 
 If branch protection requires old check names, update it for **Verify Rust and CLI** and **Verify VS Code and Linux package** after migration. Account permissions/settings and live publishing are separate from local checks.

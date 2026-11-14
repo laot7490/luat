@@ -7,8 +7,11 @@ use crate::compiler::{
     imports::{ImportCall, lua_string},
 };
 
-#[derive(Default)]
-pub(super) struct ImportPlan {
+pub(crate) type SourceParser<'a> =
+    dyn Fn(&Path, &str) -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError> + 'a;
+
+#[derive(Clone, Default)]
+pub(crate) struct ImportPlan {
     pub texts: HashMap<PathBuf, String>,
     pub resolved: HashMap<PathBuf, HashMap<String, String>>,
     pub import_types: HashMap<PathBuf, HashMap<String, String>>,
@@ -16,6 +19,11 @@ pub(super) struct ImportPlan {
     pub scripts: Option<[Vec<String>; 3]>,
     pub entries: Vec<(PathBuf, String)>,
     pub execution_contexts: HashMap<PathBuf, Vec<ExecutionContext>>,
+    pub exports: HashMap<PathBuf, String>,
+    pub calls: HashMap<PathBuf, Vec<ImportCall>>,
+    pub order: Vec<PathBuf>,
+    pub originals: [Vec<String>; 3],
+    pub dependents: HashMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 struct Module {
@@ -247,6 +255,77 @@ impl Project {
         &self,
         overlays: &HashMap<PathBuf, String>,
     ) -> Result<ImportPlan, BuildError> {
+        self.analyze_imports_with_parser(overlays, None, None)
+    }
+
+    pub(crate) fn analyze_imports_with_parser(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+        parse: Option<&SourceParser<'_>>,
+        previous: Option<&ImportPlan>,
+    ) -> Result<ImportPlan, BuildError> {
+        if let (Some(parse), Some(old)) = (parse, previous) {
+            let mut plan = old.clone();
+            let mut same_graph = true;
+            for (path, old_calls) in &old.calls {
+                let Some(source) = overlays.get(path) else {
+                    same_graph = false;
+                    break;
+                };
+                if old.texts.get(path) == Some(source) {
+                    continue;
+                }
+                let calls =
+                    parse(path, source)?
+                        .import_calls()
+                        .map_err(|error| BuildError::Compile {
+                            path: path.clone(),
+                            error,
+                        })?;
+                if !calls
+                    .iter()
+                    .map(|call| &call.specifier)
+                    .eq(old_calls.iter().map(|call| &call.specifier))
+                {
+                    same_graph = false;
+                    break;
+                }
+                plan.calls.insert(path.clone(), calls);
+            }
+            if same_graph {
+                for (path, source) in &mut plan.texts {
+                    if let Some(current) = overlays.get(path) {
+                        *source = current.clone();
+                    }
+                }
+                let targets = self.resolved_imports(old);
+                for path in &old.order {
+                    let imports = targets
+                        .get(path)
+                        .into_iter()
+                        .flatten()
+                        .map(|(specifier, target)| {
+                            (
+                                specifier.clone(),
+                                plan.exports
+                                    .get(&target.target_path)
+                                    .cloned()
+                                    .unwrap_or_else(|| "any".into()),
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
+                    if old.texts.get(path) != plan.texts.get(path)
+                        || old.import_types.get(path) != Some(&imports)
+                    {
+                        let parsed = parse(path, &plan.texts[path])?;
+                        plan.exports
+                            .insert(path.clone(), parsed.export_type(&imports));
+                    }
+                    plan.import_types.insert(path.clone(), imports);
+                }
+                return Ok(plan);
+            }
+        }
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
         let mut paths = HashMap::new();
@@ -283,16 +362,21 @@ impl Project {
             );
         }
         let f = &self.config.fivem;
-        let mut originals: [Vec<String>; 3] = Default::default();
-        for (side, entries) in [&f.shared, &f.client, &f.server].into_iter().enumerate() {
-            originals[side] =
-                manifest::expanded_paths(entries, &self.root, false).map_err(|message| {
-                    BuildError::Configuration {
-                        path: self.config_path.clone(),
-                        message,
-                    }
-                })?;
+        let mut originals: [Vec<String>; 3] = previous
+            .map(|plan| plan.originals.clone())
+            .unwrap_or_default();
+        if previous.is_none() {
+            for (side, entries) in [&f.shared, &f.client, &f.server].into_iter().enumerate() {
+                originals[side] =
+                    manifest::expanded_paths(entries, &self.root, false).map_err(|message| {
+                        BuildError::Configuration {
+                            path: self.config_path.clone(),
+                            message,
+                        }
+                    })?;
+            }
         }
+        plan.originals = originals.clone();
         let mut pending = originals
             .iter()
             .flatten()
@@ -340,11 +424,18 @@ impl Project {
                     source,
                 })?,
             };
-            let calls = collect_imports(&source).map_err(|error| BuildError::Compile {
+            let calls = (if let Some(parse) = parse {
+                let parsed = parse(&path, &source)?;
+                parsed.import_calls()
+            } else {
+                collect_imports(&source)
+            })
+            .map_err(|error| BuildError::Compile {
                 path: path.clone(),
                 error,
             })?;
             plan.texts.insert(path.clone(), source.clone());
+            plan.calls.insert(path.clone(), calls.clone());
             let mut module = Module {
                 path: path.clone(),
                 source,
@@ -366,6 +457,14 @@ impl Project {
             modules.insert(id, module);
         }
         modules.retain(|id, _| visited.contains(id));
+        for module in modules.values() {
+            for (_, target) in &module.edges {
+                plan.dependents
+                    .entry(modules[target].path.clone())
+                    .or_default()
+                    .insert(module.path.clone());
+            }
+        }
         let mut context_stack = roots;
         let mut visited_contexts = HashSet::new();
         while let Some((id, context)) = context_stack.pop() {
@@ -429,14 +528,21 @@ impl Project {
         let mut export_types = HashMap::<String, String>::new();
         for id in dependency_order {
             let module = &modules[&id];
+            plan.order.push(module.path.clone());
             let import_types = module
                 .edges
                 .iter()
                 .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
                 .collect::<HashMap<_, _>>();
-            let export_type =
-                crate::compiler::infer_module_export_type(&module.source, &import_types);
+            let export_type = if let Some(parse) = parse {
+                let parsed = parse(&module.path, &module.source)?;
+                parsed.export_type(&import_types)
+            } else {
+                crate::compiler::infer_module_export_type(&module.source, &import_types)
+            };
             plan.import_types.insert(module.path.clone(), import_types);
+            plan.exports
+                .insert(module.path.clone(), export_type.clone());
             export_types.insert(id.clone(), export_type);
         }
 

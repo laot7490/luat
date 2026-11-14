@@ -126,7 +126,7 @@ impl AnalysisSnapshot {
                 Documentation::before(&file.source, symbol.range.start),
             );
         };
-        if let Some(root) = nearest_project_root(path)
+        if let Some(root) = self.project_root(path)
             && let Some(index) = self.project_symbols.get(&root)
         {
             for group in index.values() {
@@ -361,7 +361,7 @@ impl AnalysisSnapshot {
         offset: usize,
     ) -> Option<(Vec<RecordField>, HashSet<String>)> {
         let file = self.files.get(path)?;
-        let tokens = lex(&file.prepared.text);
+        let tokens = &file.tokens;
         let mut stack = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
             if file
@@ -479,7 +479,7 @@ impl AnalysisSnapshot {
         {
             return None;
         }
-        let range = identifier_range_at(&file.source, offset)?;
+        let range = file.identifier_range_at(offset)?;
         let before = file.source[..range.start].trim_end().strip_suffix('.')?;
         let expression = self.receiver_expression(&file.source, before.len())?;
         let (context, ty) = self.receiver_type(path, range.start, expression)?;
