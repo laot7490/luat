@@ -1,5 +1,6 @@
 pub mod documentation;
 mod editor;
+mod inputs;
 mod records;
 use documentation::Documentation;
 pub use editor::{EditorDiagnostic, EditorInlayHint, EditorSymbol, EditorSymbolKind};
@@ -21,13 +22,13 @@ use full_moon::{
 
 use crate::{
     BuildError, Diagnostic, Project,
-    compiler::{declarations::DeclarationSet, syntax},
+    compiler::{ParsedSource, declarations::DeclarationSet, syntax},
 };
 
 fn declaration_sources(
     path: &Path,
     source: &str,
-    overlays: &BTreeMap<PathBuf, String>,
+    overlays: &BTreeMap<PathBuf, Arc<str>>,
 ) -> Vec<crate::compiler::declarations::DeclarationSource> {
     let mut texts = BTreeMap::new();
     if let Some(parent) = path.parent() {
@@ -43,7 +44,7 @@ fn declaration_sources(
         }
         for (file, text) in overlays {
             if file.parent() == Some(parent) && file.to_string_lossy().ends_with(".d.luat") {
-                texts.insert(file.clone(), text.clone());
+                texts.insert(file.clone(), text.to_string());
             }
         }
     }
@@ -63,13 +64,20 @@ fn declaration_sources(
 /// Owns the latest editor buffers used to create analysis snapshots.
 #[derive(Clone, Default)]
 pub struct AnalysisHost {
-    files: BTreeMap<PathBuf, String>,
+    files: Arc<BTreeMap<PathBuf, Arc<str>>>,
     revision: u64,
     dirty_paths: BTreeSet<PathBuf>,
     cached: Option<(u64, AnalysisSnapshot)>,
     project_declarations: HashMap<PathBuf, Arc<DeclarationSet>>,
     project_configs: HashMap<PathBuf, String>,
-    project_contexts: HashMap<PathBuf, Project>,
+    project_contexts: HashMap<PathBuf, Arc<Project>>,
+    filesystem_dirty: BTreeSet<PathBuf>,
+    invalid_configs: HashSet<PathBuf>,
+    inputs: inputs::Inputs,
+    roots: HashMap<PathBuf, Option<PathBuf>>,
+    editor_cached: Option<(u64, AnalysisSnapshot)>,
+    import_plans: HashMap<PathBuf, Arc<crate::project::imports::ImportPlan>>,
+    project_epoch: u64,
 }
 
 impl AnalysisHost {
@@ -78,129 +86,271 @@ impl AnalysisHost {
     }
 
     pub fn set_file(&mut self, path: PathBuf, source: String) {
-        if self.files.get(&path) == Some(&source) {
+        if self.files.get(&path).map(AsRef::as_ref) == Some(source.as_str()) {
             return;
         }
-        self.files.insert(path.clone(), source);
+        if path.file_name().is_some_and(|name| name == "luat.toml") {
+            self.roots.clear();
+        }
+        Arc::make_mut(&mut self.files).insert(path.clone(), source.into());
         self.revision += 1;
         self.dirty_paths.insert(path);
     }
 
     pub fn remove_file(&mut self, path: &Path) {
-        if self.files.remove(path).is_some() {
+        if Arc::make_mut(&mut self.files).remove(path).is_some() {
             self.revision += 1;
             self.dirty_paths.insert(path.to_path_buf());
         }
     }
 
     pub fn invalidate_path(&mut self, path: &Path) {
-        self.revision += 1;
-        self.dirty_paths.insert(path.to_path_buf());
+        self.invalidate_file(path);
+        self.filesystem_dirty.insert(path.to_path_buf());
     }
 
-    pub fn snapshot(&mut self) -> AnalysisSnapshot {
-        if let Some((revision, snapshot)) = &self.cached
+    pub fn invalidate_file(&mut self, path: &Path) {
+        self.revision += 1;
+        self.dirty_paths.insert(path.to_path_buf());
+        if path.file_name().is_some_and(|name| name == "luat.toml") {
+            self.roots.clear();
+        }
+    }
+
+    pub fn warm_builtins() {
+        let _ = builtin_index();
+    }
+
+    pub fn adopt_editor_cache(&mut self, other: &Self) {
+        if self.revision == other.revision && self.project_epoch == other.project_epoch {
+            self.editor_cached = other.editor_cached.clone();
+        }
+    }
+
+    pub fn editor_snapshot(&mut self) -> AnalysisSnapshot {
+        if let Some((revision, snapshot)) = &self.editor_cached
             && *revision == self.revision
         {
             return snapshot.clone();
         }
-        let previous = self.cached.as_ref().map(|(_, snapshot)| snapshot);
-        let mut files = self
-            .files
-            .iter()
-            .filter(|(path, _)| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(".luat"))
-            })
-            .map(|(path, source)| {
-                (
-                    path.clone(),
-                    previous
-                        .and_then(|snapshot| snapshot.files.get(path))
-                        .filter(|file| file.source == *source && !self.dirty_paths.contains(path)
-                            && !(path.to_string_lossy().ends_with(".d.luat") && self.dirty_paths.iter().any(|changed| changed.parent() == path.parent() && changed.to_string_lossy().ends_with(".d.luat"))))
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            if path
-                                .file_name()
-                                .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
-                            {
-                                return Arc::new(
-                                    match DeclarationSet::from_sources(declaration_sources(path, source, &self.files)) {
-                                        Ok(set) => {
-                                            let file = set.files.iter().find(|file| file.path.as_ref() == Some(path)).unwrap();
-                                            AnalyzedFile::from_ast(
-                                                source,
-                                                file.prepared.clone(),
-                                                &file.ast,
-                                                Vec::new(),
-                                                true,
-                                            )
-                                        }
-                                        Err((error_path, mut error)) => {
-                                            if error_path.as_ref().is_some_and(|other| other != path) { error.diagnostics.clear(); }
-                                            match crate::compiler::declarations::parse_declaration_file(source) { Ok((prepared, ast, _)) => AnalyzedFile::from_ast(source, prepared, &ast, error.diagnostics, true), Err(_) => AnalyzedFile::new(source, error.diagnostics) }
-                                        }
-                                    },
-                                );
-                            }
-                            let diagnostics = crate::compiler::check_source_for_analysis(source)
-                                .err()
-                                .map_or_else(Vec::new, |error| error.diagnostics);
-                            Arc::new(AnalyzedFile::new(source, diagnostics))
-                        }),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let mut diagnostics = files
-            .iter()
-            .map(|(path, file)| (path.clone(), file.diagnostics.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut snapshot = self
+            .cached
+            .as_ref()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default();
+        let mut changed = Vec::new();
+        for (path, source) in self.files.iter() {
+            if path.to_string_lossy().ends_with(".luat") {
+                let file = self.inputs.file(path, source);
+                if !snapshot
+                    .files
+                    .get(path)
+                    .is_some_and(|old| Arc::ptr_eq(&old.parsed, &file.parsed))
+                {
+                    Arc::make_mut(&mut snapshot.files).insert(path.clone(), Arc::clone(&file));
+                    changed.push((path.clone(), file));
+                }
+            }
+        }
+        Arc::make_mut(&mut snapshot.files).retain(|path, _| {
+            self.files.contains_key(path) || self.roots.get(path).is_some_and(|root| root.is_some())
+        });
+        for (path, file) in changed {
+            if let Some(imports) = snapshot.resolved_imports.get(&path) {
+                let bindings = collect_import_bindings(&file, imports, &snapshot.files);
+                let mut file = Arc::clone(&file);
+                for binding in &bindings {
+                    if let Some(symbol) = Arc::make_mut(&mut file).symbols.get_mut(binding.symbol) {
+                        symbol.type_name = binding.type_name.clone();
+                    }
+                }
+                Arc::make_mut(&mut snapshot.files).insert(path.clone(), file);
+                Arc::make_mut(&mut snapshot.project_imports).insert(path.clone(), bindings);
+            }
+            if let Some(root) = snapshot.project_root(&path) {
+                let index = Arc::make_mut(&mut snapshot.project_symbols)
+                    .entry(root)
+                    .or_default();
+                index.retain(|_, group| {
+                    group.retain(|symbol| symbol.path != path);
+                    !group.is_empty()
+                });
+                for symbol in &file.symbols {
+                    if symbol.scope_depth != 0 || symbol.kind != SymbolKind::Function {
+                        continue;
+                    }
+                    index
+                        .entry(symbol.name.clone())
+                        .or_default()
+                        .push(ProjectSymbol {
+                            name: symbol.name.clone(),
+                            kind: ProjectSymbolKind::Function,
+                            path: path.clone(),
+                            range: symbol.range.clone(),
+                            type_name: symbol.type_name.clone(),
+                            signature: symbol.signature.clone(),
+                            documentation: documentation_before(&file.source, symbol.range.start),
+                        });
+                }
+            }
+        }
+        snapshot.semantic_cache = Default::default();
+        self.editor_cached = Some((self.revision, snapshot.clone()));
+        snapshot
+    }
+
+    pub fn snapshot(&mut self) -> AnalysisSnapshot {
+        self.snapshot_cancellable(&|| false)
+            .expect("uncancelled analysis")
+    }
+
+    pub fn snapshot_cancellable(
+        &mut self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<AnalysisSnapshot> {
+        if let Some((revision, snapshot)) = &self.cached
+            && *revision == self.revision
+        {
+            return Some(snapshot.clone());
+        }
+        for path in &self.dirty_paths {
+            self.roots
+                .entry(path.clone())
+                .or_insert_with(|| nearest_project_root(path));
+        }
+        let previous_snapshot = self.cached.as_ref().map(|(_, snapshot)| snapshot.clone());
+        let previous = previous_snapshot.as_ref();
+        if cancelled() {
+            return None;
+        }
+        let mut files = BTreeMap::new();
+        for (path, source) in self.files.iter() {
+            if cancelled() {
+                return None;
+            }
+            if path.to_string_lossy().ends_with(".luat") {
+                files.insert(path.clone(), self.inputs.file(path, source));
+            }
+        }
         let mut projects = BTreeMap::<PathBuf, HashMap<PathBuf, String>>::new();
-        for (path, source) in &self.files {
-            if let Some(root) = nearest_project_root(path) {
+        for (path, source) in self.files.iter() {
+            if let Some(root) = self
+                .roots
+                .entry(path.clone())
+                .or_insert_with(|| nearest_project_root(path))
+                .clone()
+            {
                 projects
                     .entry(root)
                     .or_default()
-                    .insert(path.clone(), source.clone());
+                    .insert(path.clone(), source.to_string());
             }
         }
+        let mut diagnostics = HashMap::new();
+        for (path, file) in &files {
+            if cancelled() {
+                return None;
+            }
+            let old = previous
+                .and_then(|snapshot| snapshot.files.get(path))
+                .filter(|old| Arc::ptr_eq(&old.parsed, &file.parsed));
+            let declaration = path.to_string_lossy().ends_with(".d.luat");
+            let siblings_changed = declaration
+                && self.dirty_paths.iter().any(|changed| {
+                    changed.parent() == path.parent()
+                        && changed.to_string_lossy().ends_with(".d.luat")
+                });
+            let errors = if declaration && (old.is_none() || siblings_changed) {
+                DeclarationSet::from_sources(declaration_sources(path, &file.source, &self.files))
+                    .err()
+                    .filter(|(error_path, _)| error_path.as_ref().is_none_or(|p| p == path))
+                    .map_or_else(|| file.diagnostics.clone(), |(_, error)| error.diagnostics)
+            } else if let Some(old) = old {
+                old.diagnostics.clone()
+            } else if self.roots.get(path).is_some_and(|root| root.is_some()) {
+                file.base_diagnostics.clone()
+            } else {
+                file.standalone_diagnostics
+                    .get_or_init(|| {
+                        file.parsed
+                            .check(&DeclarationSet::default(), false, None, None)
+                            .err()
+                            .map_or_else(Vec::new, |error| error.diagnostics)
+                    })
+                    .clone()
+            };
+            diagnostics.insert(path.clone(), errors);
+        }
         let mut contexts = previous
-            .map(|snapshot| snapshot.contexts.clone())
+            .map(|snapshot| (*snapshot.contexts).clone())
             .unwrap_or_default();
         let mut project_symbols = HashMap::new();
         let mut project_imports = HashMap::new();
-        for (root, overlays) in projects {
-            let changed = self
+        let mut all_resolved_imports = HashMap::new();
+        let mut project_files = HashSet::new();
+        for (root, mut overlays) in projects {
+            if cancelled() {
+                return None;
+            }
+            let mut changed = self
                 .dirty_paths
                 .iter()
-                .filter(|path| nearest_project_root(path).as_ref() == Some(&root))
+                .filter(|path| {
+                    self.roots
+                        .get(path.as_path())
+                        .and_then(|root| root.as_ref())
+                        == Some(&root)
+                })
                 .cloned()
                 .collect::<BTreeSet<_>>();
             let config_path = root.join("luat.toml");
             let config_text = overlays
                 .get(&config_path)
                 .cloned()
+                .or_else(|| {
+                    if !self.dirty_paths.contains(&config_path)
+                        && !self.invalid_configs.contains(&root)
+                    {
+                        self.project_configs.get(&root).cloned()
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| fs::read_to_string(&config_path).ok());
-            let current_load = match config_text.as_deref() {
-                Some(source) => Project::load_with_config_text(&config_path, source),
-                None => Project::load(&root),
+            let reload = !self.project_contexts.contains_key(&root)
+                || self.invalid_configs.contains(&root)
+                || changed
+                    .iter()
+                    .any(|path| path == &config_path || self.filesystem_dirty.contains(path));
+            let current_load = if !reload {
+                Ok((*self.project_contexts[&root]).clone())
+            } else {
+                match config_text.as_deref() {
+                    Some(source) => Project::load_with_config_text(&config_path, source),
+                    None => Project::load(&root),
+                }
             };
             let (loaded, config_error) = match current_load {
                 Ok(project) => {
+                    self.invalid_configs.remove(&root);
                     if let Some(source) = config_text {
                         self.project_configs.insert(root.clone(), source);
                     }
                     (Ok(project), None)
                 }
                 Err(error) => {
+                    self.invalid_configs.insert(root.clone());
                     let fallback = self
                         .project_configs
                         .get(&root)
                         .and_then(|source| {
                             Project::load_with_config_text(&config_path, source).ok()
                         })
-                        .or_else(|| self.project_contexts.get(&root).cloned());
+                        .or_else(|| {
+                            self.project_contexts
+                                .get(&root)
+                                .map(|project| (**project).clone())
+                        });
                     match fallback {
                         Some(project) => (Ok(project), Some(error)),
                         None => (Err(error), None),
@@ -208,15 +358,16 @@ impl AnalysisHost {
                 }
             };
             if let Ok(project) = &loaded {
-                self.project_contexts.insert(root.clone(), project.clone());
+                self.project_contexts
+                    .insert(root.clone(), Arc::new(project.clone()));
             }
             match loaded {
                 Ok(project) => {
-                    contexts.extend(project.editor_contexts(&overlays));
                     let declarations_changed = changed.iter().any(|path| {
                         path == &root.join("luat.toml")
                             || project.declaration_files().contains(path)
                     });
+                    let mut declaration_error = None;
                     let declarations =
                         if declarations_changed || !self.project_declarations.contains_key(&root) {
                             match project.read_declarations_with_overlays(&overlays) {
@@ -225,7 +376,11 @@ impl AnalysisHost {
                                         .insert(root.clone(), Arc::new(declarations));
                                     self.project_declarations.get(&root).cloned()
                                 }
-                                Err(_) => None,
+                                Err(error) => {
+                                    self.project_declarations.remove(&root);
+                                    declaration_error = Some(error);
+                                    None
+                                }
                             }
                         } else {
                             self.project_declarations.get(&root).cloned()
@@ -234,48 +389,33 @@ impl AnalysisHost {
                         if files.contains_key(path) {
                             continue;
                         }
-                        let Ok(source) = fs::read_to_string(path) else {
+                        if cancelled() {
+                            return None;
+                        }
+                        let source = previous
+                            .and_then(|s| s.files.get(path))
+                            .filter(|_| !self.dirty_paths.contains(path))
+                            .map(|file| file.source.clone())
+                            .or_else(|| fs::read_to_string(path).ok());
+                        let Some(source) = source else {
                             continue;
                         };
+                        let parsed = self.inputs.file(path, &source);
                         let file = previous
-                            .and_then(|snapshot| snapshot.files.get(path))
-                            .filter(|file| {
-                                file.source == source && !self.dirty_paths.contains(path)
-                            })
+                            .and_then(|s| s.files.get(path))
+                            .filter(|old| Arc::ptr_eq(&old.parsed, &parsed.parsed))
                             .cloned()
-                            .unwrap_or_else(|| {
-                                if path.to_string_lossy().ends_with(".d.luat") {
-                                    return Arc::new(
-                                        match crate::compiler::declarations::parse_declaration_file(
-                                            &source,
-                                        ) {
-                                            Ok((prepared, ast, _)) => AnalyzedFile::from_ast(
-                                                &source,
-                                                prepared,
-                                                &ast,
-                                                Vec::new(),
-                                                true,
-                                            ),
-                                            Err(error) => {
-                                                AnalyzedFile::new(&source, error.diagnostics)
-                                            }
-                                        },
-                                    );
-                                }
-                                let diagnostics =
-                                    crate::compiler::check_source_for_analysis(&source)
-                                        .err()
-                                        .map_or_else(Vec::new, |error| error.diagnostics);
-                                Arc::new(AnalyzedFile::new(&source, diagnostics))
-                            });
+                            .unwrap_or(parsed);
                         diagnostics.insert(path.to_path_buf(), file.diagnostics.clone());
                         files.insert(path.to_path_buf(), file);
+                        self.roots.insert(path.to_path_buf(), Some(root.clone()));
                     }
                     if let Some(declarations) = &declarations {
                         for declaration in
                             declarations.files.iter().filter(|file| file.path.is_some())
                         {
                             let path = declaration.path.as_ref().unwrap();
+                            self.roots.insert(path.clone(), Some(root.clone()));
                             let file = previous
                                 .and_then(|snapshot| snapshot.files.get(path))
                                 .filter(|file| {
@@ -296,17 +436,80 @@ impl AnalysisHost {
                             files.insert(path.clone(), file);
                         }
                     }
-                    let (checked, result, resolved_imports) = match &declarations {
-                        Some(declarations) => project.check_changed_with_declarations_and_imports(
-                            &overlays,
-                            &changed,
-                            declarations,
-                        ),
-                        None => {
-                            project.check_changed_with_overlays_and_imports(&overlays, &changed)
+                    for (path, file) in &files {
+                        if self.roots.get(path).and_then(|r| r.as_ref()) == Some(&root) {
+                            overlays.insert(path.clone(), file.source.clone());
                         }
+                    }
+                    // Global declarations affect callers even without an explicit import.
+                    if changed.iter().any(|path| {
+                        let globals = |file: &AnalyzedFile| {
+                            file.symbols
+                                .iter()
+                                .filter(|symbol| {
+                                    symbol.scope_depth == 0 && symbol.kind == SymbolKind::Function
+                                })
+                                .map(|symbol| (symbol.name.clone(), symbol.signature.clone()))
+                                .collect::<Vec<_>>()
+                        };
+                        files.get(path).map(|f| globals(f))
+                            != previous.and_then(|s| s.files.get(path)).map(|f| globals(f))
+                    }) {
+                        changed.insert(config_path.clone());
+                    }
+                    let parse = |path: &Path, source: &str| {
+                        if cancelled() {
+                            return Err(BuildError::Io {
+                                path: path.to_path_buf(),
+                                source: std::io::Error::from(std::io::ErrorKind::Interrupted),
+                            });
+                        }
+                        Ok(Arc::clone(&self.inputs.file(path, source).parsed))
                     };
+                    let plan = project.analyze_imports_with_parser(
+                        &overlays,
+                        Some(&parse),
+                        if reload {
+                            None
+                        } else {
+                            self.import_plans.get(&root).map(AsRef::as_ref)
+                        },
+                    );
+                    let (checked, result, resolved_imports) = match plan {
+                        Ok(plan) => {
+                            project_files.extend(plan.texts.keys().cloned());
+                            contexts.retain(|path, _| {
+                                self.roots.get(path).and_then(|root| root.as_ref()) != Some(&root)
+                            });
+                            contexts.extend(plan.execution_contexts.clone());
+                            let (checked, result, imports) =
+                                if let Some(declarations) = &declarations {
+                                    project.check_editor_with_plan(
+                                        &plan,
+                                        self.import_plans.get(&root).map(AsRef::as_ref),
+                                        &changed,
+                                        declarations,
+                                        &parse,
+                                    )
+                                } else {
+                                    (
+                                        overlays.keys().cloned().collect(),
+                                        Ok(()),
+                                        project.resolved_imports(&plan),
+                                    )
+                                };
+                            self.import_plans.insert(root.clone(), Arc::new(plan));
+                            (checked, result, Some(imports))
+                        }
+                        Err(error) => (overlays.keys().cloned().collect(), Err(error), None),
+                    };
+                    if cancelled() {
+                        return None;
+                    }
                     for path in checked {
+                        if path.to_string_lossy().ends_with(".d.luat") {
+                            continue;
+                        }
                         if let Some(file) = files.get(&path) {
                             let mut base = file.base_diagnostics.clone();
                             base.retain(|diagnostic| diagnostic.code != "LT4007");
@@ -316,7 +519,11 @@ impl AnalysisHost {
                     if let Err(error) = result {
                         apply_project_error(error, &overlays, &mut diagnostics);
                     }
+                    if let Some(error) = declaration_error {
+                        apply_project_error(error, &overlays, &mut diagnostics);
+                    }
                     if let Some(resolved_imports) = resolved_imports {
+                        all_resolved_imports.extend(resolved_imports.clone());
                         for (path, imports) in resolved_imports {
                             let Some(file) = files.get(&path) else {
                                 continue;
@@ -429,7 +636,12 @@ impl AnalysisHost {
                         let project_files = previous
                             .files
                             .iter()
-                            .filter(|(path, _)| nearest_project_root(path).as_ref() == Some(&root))
+                            .filter(|(path, _)| {
+                                self.roots
+                                    .get(path.as_path())
+                                    .and_then(|root| root.as_ref())
+                                    == Some(&root)
+                            })
                             .collect::<Vec<_>>();
                         let context_unchanged = !project_files.is_empty()
                             && project_files.iter().all(|(path, file)| {
@@ -447,8 +659,10 @@ impl AnalysisHost {
                                 files.insert(path.clone(), file.clone());
                                 diagnostics.insert(path.clone(), file.diagnostics.clone());
                             }
-                            for (path, imports) in &previous.project_imports {
-                                if nearest_project_root(path).as_ref() == Some(&root) {
+                            for (path, imports) in previous.project_imports.iter() {
+                                if self.roots.get(path).and_then(|root| root.as_ref())
+                                    == Some(&root)
+                                {
                                     project_imports.insert(path.clone(), imports.clone());
                                 }
                             }
@@ -463,18 +677,50 @@ impl AnalysisHost {
                 }
             }
         }
+        for (path, file) in &files {
+            if path.to_string_lossy().ends_with(".d.luat")
+                || project_files.contains(path)
+                || self.roots.get(path).is_none_or(|root| root.is_none())
+            {
+                continue;
+            }
+            let standalone = file.standalone_diagnostics.get_or_init(|| {
+                file.parsed
+                    .check(&DeclarationSet::default(), false, None, None)
+                    .err()
+                    .map_or_else(Vec::new, |error| error.diagnostics)
+            });
+            let errors = diagnostics.entry(path.clone()).or_default();
+            for error in standalone {
+                if error.code != "LT4007" && !errors.contains(error) {
+                    errors.push(error.clone());
+                }
+            }
+        }
         for (path, file) in &mut files {
-            Arc::make_mut(file).diagnostics = diagnostics.remove(path).unwrap_or_default();
+            let diagnostics = diagnostics.remove(path).unwrap_or_default();
+            if file.diagnostics != diagnostics {
+                Arc::make_mut(file).diagnostics = diagnostics;
+            }
+        }
+        if cancelled() {
+            return None;
         }
         let snapshot = AnalysisSnapshot {
-            contexts,
-            files,
-            project_symbols,
-            project_imports,
+            contexts: Arc::new(contexts),
+            files: Arc::new(files),
+            project_symbols: Arc::new(project_symbols),
+            project_imports: Arc::new(project_imports),
+            roots: Arc::new(self.roots.clone()),
+            semantic_cache: Default::default(),
+            resolved_imports: Arc::new(all_resolved_imports),
         };
         self.dirty_paths.clear();
+        self.filesystem_dirty.clear();
         self.cached = Some((self.revision, snapshot.clone()));
-        snapshot
+        self.editor_cached = None;
+        self.project_epoch += 1;
+        Some(snapshot)
     }
 }
 
@@ -562,10 +808,14 @@ impl std::error::Error for RenameError {}
 
 #[derive(Clone, Default)]
 pub struct AnalysisSnapshot {
-    contexts: HashMap<PathBuf, Vec<crate::ExecutionContext>>,
-    files: BTreeMap<PathBuf, Arc<AnalyzedFile>>,
-    project_symbols: HashMap<PathBuf, HashMap<String, Vec<ProjectSymbol>>>,
-    project_imports: HashMap<PathBuf, Vec<ImportBinding>>,
+    contexts: Arc<HashMap<PathBuf, Vec<crate::ExecutionContext>>>,
+    files: Arc<BTreeMap<PathBuf, Arc<AnalyzedFile>>>,
+    project_symbols: Arc<HashMap<PathBuf, HashMap<String, Vec<ProjectSymbol>>>>,
+    project_imports: Arc<HashMap<PathBuf, Vec<ImportBinding>>>,
+    roots: Arc<HashMap<PathBuf, Option<PathBuf>>>,
+    semantic_cache:
+        Arc<std::sync::Mutex<HashMap<PathBuf, Vec<(std::ops::Range<usize>, u32, u32)>>>>,
+    resolved_imports: Arc<crate::project::ResolvedImports>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -602,13 +852,17 @@ struct ImportMember {
 }
 
 impl AnalysisSnapshot {
+    fn project_root(&self, path: &Path) -> Option<PathBuf> {
+        self.roots.get(path).cloned().flatten()
+    }
+
     fn project_group(
         &self,
         path: &Path,
         name: &str,
         kind: ProjectSymbolKind,
     ) -> Option<&[ProjectSymbol]> {
-        let root = nearest_project_root(path)?;
+        let root = self.project_root(path)?;
         let candidates = self.project_symbols.get(&root)?.get(name)?;
         let count = candidates
             .iter()
@@ -620,9 +874,9 @@ impl AnalysisSnapshot {
 
     fn project_symbol_at(&self, path: &Path, byte_offset: usize) -> Option<&ProjectSymbol> {
         let file = self.files.get(path)?;
-        let range = identifier_range_at(&file.source, byte_offset)?;
+        let range = file.identifier_range_at(byte_offset)?;
         let name = &file.source[range.clone()];
-        let root = nearest_project_root(path)?;
+        let root = self.project_root(path)?;
         let candidates = self.project_symbols.get(&root)?.get(name)?;
         if let Some(symbol) = candidates
             .iter()
@@ -670,7 +924,7 @@ impl AnalysisSnapshot {
         byte_offset: usize,
     ) -> Option<(&'a PathBuf, &'a str, &'a ImportMember)> {
         let file = self.files.get(path)?;
-        let range = identifier_range_at(&file.source, byte_offset)?;
+        let range = file.identifier_range_at(byte_offset)?;
         let name = &file.source[range.clone()];
         if let Some(receiver) = member_receiver_range(&file.source, &range)
             && let Some(occurrence) = file.occurrence_at(receiver.start)
@@ -704,7 +958,7 @@ impl AnalysisSnapshot {
         include_declaration: bool,
     ) -> Vec<FileRange> {
         let mut references = Vec::new();
-        for (importer_path, bindings) in &self.project_imports {
+        for (importer_path, bindings) in self.project_imports.iter() {
             let Some(file) = self.files.get(importer_path) else {
                 continue;
             };
@@ -763,9 +1017,11 @@ impl AnalysisSnapshot {
         name: &str,
         new_name: &str,
     ) -> Result<WorkspaceEdit, RenameError> {
-        let root = nearest_project_root(target_path).ok_or(RenameError::NotRenameable)?;
+        let root = self
+            .project_root(target_path)
+            .ok_or(RenameError::NotRenameable)?;
         if self.files.iter().any(|(path, file)| {
-            nearest_project_root(path).as_ref() == Some(&root) && !file.syntax_valid
+            self.project_root(path).as_ref() == Some(&root) && !file.syntax_valid
         }) {
             return Err(RenameError::NotRenameable);
         }
@@ -835,15 +1091,15 @@ impl AnalysisSnapshot {
         kind: ProjectSymbolKind,
         include_declaration: bool,
     ) -> Vec<FileRange> {
-        let Some(root) = nearest_project_root(path) else {
+        let Some(root) = self.project_root(path) else {
             return Vec::new();
         };
         let Some(group) = self.project_group(path, name, kind) else {
             return Vec::new();
         };
         let mut references = Vec::new();
-        for (candidate_path, file) in &self.files {
-            if nearest_project_root(candidate_path).as_ref() != Some(&root) {
+        for (candidate_path, file) in self.files.iter() {
+            if self.project_root(candidate_path).as_ref() != Some(&root) {
                 continue;
             }
             for token in scan_identifiers(&file.prepared.text) {
@@ -891,15 +1147,15 @@ impl AnalysisSnapshot {
         symbol: &ProjectSymbol,
         new_name: &str,
     ) -> Result<WorkspaceEdit, RenameError> {
-        let root = nearest_project_root(path).ok_or(RenameError::NotRenameable)?;
+        let root = self.project_root(path).ok_or(RenameError::NotRenameable)?;
         let group = self
             .project_group(path, &symbol.name, symbol.kind)
             .ok_or(RenameError::NotRenameable)?;
         if !builtin_by_short_name(&symbol.name).is_empty() {
             return Err(RenameError::NotRenameable);
         }
-        for (candidate_path, file) in &self.files {
-            if nearest_project_root(candidate_path).as_ref() == Some(&root)
+        for (candidate_path, file) in self.files.iter() {
+            if self.project_root(candidate_path).as_ref() == Some(&root)
                 && (!file.syntax_valid
                     || file.symbols.iter().any(|other| {
                         other.name == new_name
@@ -954,13 +1210,16 @@ impl AnalysisSnapshot {
     }
 
     pub fn semantic_tokens(&self, path: &Path) -> Vec<(std::ops::Range<usize>, u32, u32)> {
+        if let Some(tokens) = self.semantic_cache.lock().unwrap().get(path) {
+            return tokens.clone();
+        }
         let Some(file) = self.files.get(path) else {
             return Vec::new();
         };
-        let mut result = Vec::new();
+        let mut result = BTreeMap::<(usize, usize), (u32, u32)>::new();
+        let mut deprecated = HashMap::new();
         for occurrence in &file.occurrences {
             let symbol = &file.symbols[occurrence.symbol];
-            let readonly = symbol.readonly;
             let kind = match symbol.kind {
                 SymbolKind::Parameter => 1,
                 SymbolKind::TypeAlias => 2,
@@ -968,16 +1227,28 @@ impl AnalysisSnapshot {
                 SymbolKind::Local if symbol.signature.is_some() => 3,
                 SymbolKind::Local => 0,
             };
-            result.push((
-                occurrence.range.clone(),
-                kind,
-                u32::from(readonly) | (u32::from(occurrence.declaration) << 1),
-            ));
+            let is_deprecated = *deprecated
+                .entry(occurrence.symbol)
+                .or_insert_with(|| self.deprecated_at(path, occurrence.range.start).is_some());
+            result.insert(
+                (occurrence.range.start, occurrence.range.end),
+                (
+                    kind,
+                    u32::from(symbol.readonly)
+                        | (u32::from(occurrence.declaration) << 1)
+                        | (u32::from(is_deprecated) << 3),
+                ),
+            );
         }
+        let mut builtin_deprecated = HashMap::new();
         for token in scan_identifiers(&file.prepared.text) {
             let range = file.prepared.original_offset(token.range.start)
                 ..file.prepared.original_offset(token.range.end);
-            if result.iter().any(|(existing, _, _)| *existing == range) {
+            let key = (range.start, range.end);
+            // Normalization can turn typedef into a partial identifier named type.
+            if file.identifier_range_at(range.start).as_ref() != Some(&range)
+                || result.contains_key(&key)
+            {
                 continue;
             }
             let before = file.source[..range.start].trim_end();
@@ -989,7 +1260,14 @@ impl AnalysisSnapshot {
                     CompletionKind::Type => 2,
                     CompletionKind::Property | CompletionKind::Snippet => 4,
                 };
-                result.push((range, kind, 4));
+                let is_deprecated = *builtin_deprecated
+                    .entry((&symbol.file, &symbol.name))
+                    .or_insert_with(|| {
+                        Documentation::parse(&symbol.documentation)
+                            .deprecated
+                            .is_some()
+                    });
+                result.insert(key, (kind, 4 | (u32::from(is_deprecated) << 3)));
                 continue;
             }
             if before.ends_with('.') || (before.ends_with(':') && after.starts_with('(')) {
@@ -997,23 +1275,20 @@ impl AnalysisSnapshot {
                     .imported_member_at(path, range.start)
                     .map(|(_, _, member)| member.signature.is_some())
                     .unwrap_or_else(|| after.starts_with('(') || after.starts_with('{'));
-                result.push((range, if callable { 3 } else { 4 }, 0));
+                let modifiers = if self.deprecated_at(path, range.start).is_some() {
+                    8
+                } else {
+                    0
+                };
+                result.insert(key, (if callable { 3 } else { 4 }, modifiers));
             }
         }
         for (range, kind, modifiers) in &file.semantic_roles {
-            if let Some(existing) = result.iter_mut().find(|(r, _, _)| r == range) {
-                existing.1 = *kind;
-                existing.2 |= modifiers;
-            } else {
-                result.push((range.clone(), *kind, *modifiers));
-            }
+            let entry = result.entry((range.start, range.end)).or_insert((*kind, 0));
+            entry.0 = *kind;
+            entry.1 |= modifiers;
         }
-        let operator_tokens =
-            match Lexer::new(&file.prepared.text, LuaVersion::cfxlua().with_luau()).collect() {
-                LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
-                LexerResult::Fatal(_) => Vec::new(),
-            };
-        for token in operator_tokens {
+        for token in file.tokens.iter() {
             if is_double_slash_comment(&file.prepared.text, token.start_position().bytes()) {
                 continue;
             }
@@ -1064,34 +1339,33 @@ impl AnalysisSnapshot {
             ) {
                 continue;
             }
-            let range = file
+            let start = file
                 .prepared
-                .original_offset(token.start_position().bytes())
-                ..file.prepared.original_offset(token.end_position().bytes());
-            if let Some(existing) = result
-                .iter_mut()
-                .find(|(existing, _, _)| *existing == range)
-            {
-                existing.1 = 5;
-            } else if range.start < range.end {
-                result.push((range, 5, 0));
+                .original_offset(token.start_position().bytes());
+            let end = file.prepared.original_offset(token.end_position().bytes());
+            if start < end {
+                result
+                    .entry((start, end))
+                    .and_modify(|entry| entry.0 = 5)
+                    .or_insert((5, 0));
             }
         }
-        result.sort_by_key(|(range, _, _)| (range.start, range.end));
         let mut end = 0;
-        result.retain(|(range, _, _)| {
-            if range.start < end || range.end <= range.start {
-                return false;
-            }
-            end = range.end;
-            true
-        });
-        for (range, _, modifiers) in &mut result {
-            if self.deprecated_at(path, range.start).is_some() {
-                *modifiers |= 8;
-            }
-        }
-        result
+        let tokens = result
+            .into_iter()
+            .filter_map(|((start, stop), (kind, modifiers))| {
+                if start < end || stop <= start {
+                    return None;
+                }
+                end = stop;
+                Some((start..stop, kind, modifiers))
+            })
+            .collect::<Vec<_>>();
+        self.semantic_cache
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), tokens.clone());
+        tokens
     }
 
     pub fn diagnostics(&self, path: &Path) -> Option<&[Diagnostic]> {
@@ -1205,7 +1479,7 @@ impl AnalysisSnapshot {
         if let Some(symbol) = file.visible_symbol(label, offset) {
             return documentation_before(&file.source, symbol.range.start);
         }
-        if let Some(root) = nearest_project_root(path)
+        if let Some(root) = self.project_root(path)
             && let Some(symbol) = self
                 .project_symbols
                 .get(&root)
@@ -1259,7 +1533,7 @@ impl AnalysisSnapshot {
                 );
             }
         }
-        if let Some(root) = nearest_project_root(path)
+        if let Some(root) = self.project_root(path)
             && let Some(symbols) = self.project_symbols.get(&root)
         {
             for symbols in symbols.values() {
@@ -1303,7 +1577,13 @@ impl AnalysisSnapshot {
                 }
             }
         }
-        items.into_values().collect()
+        items
+            .into_values()
+            .map(|mut item| {
+                item.detail = crate::compiler::typecheck::display_type(&item.detail);
+                item
+            })
+            .collect()
     }
 
     fn builtin_at(
@@ -1312,7 +1592,7 @@ impl AnalysisSnapshot {
         byte_offset: usize,
     ) -> Option<(std::ops::Range<usize>, &'static BuiltinSymbol)> {
         let file = self.files.get(path)?;
-        let range = identifier_range_at(&file.source, byte_offset)?;
+        let range = file.identifier_range_at(byte_offset)?;
         self.builtin_in_range(path, range)
     }
 
@@ -1360,7 +1640,7 @@ impl AnalysisSnapshot {
                 range: if target_path == path {
                     member.range.clone()
                 } else {
-                    identifier_range_at(&file.source, byte_offset)?
+                    file.identifier_range_at(byte_offset)?
                 },
                 contents: hover_markdown(
                     &member.signature.as_ref().map_or_else(
@@ -1383,7 +1663,7 @@ impl AnalysisSnapshot {
                 .map(|signature| signature.label.clone())
                 .unwrap_or_else(|| format!("{}: {}", symbol.name, symbol.type_name));
             return Some(HoverResult {
-                range: identifier_range_at(&file.source, byte_offset)?,
+                range: file.identifier_range_at(byte_offset)?,
                 contents: hover_markdown(&detail, &symbol.documentation),
             });
         }
@@ -1412,7 +1692,7 @@ impl AnalysisSnapshot {
     pub fn signature_help(&self, path: &Path, byte_offset: usize) -> Option<SignatureHelp> {
         let file = self.files.get(path)?;
         let offset = clamp_offset(&file.source, byte_offset);
-        let tokens = lex(&file.prepared.text);
+        let tokens = &file.tokens;
         let mut opens = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
             let start = token.start_position().bytes();
@@ -1452,7 +1732,8 @@ impl AnalysisSnapshot {
         let name_offset = file
             .prepared
             .original_offset(name_token.start_position().bytes());
-        let member = identifier_range_at(&file.source, name_offset)
+        let member = file
+            .identifier_range_at(name_offset)
             .and_then(|range| member_receiver_range(&file.source, &range));
         let signatures = if let Some(signature) = self.member_signature(path, name_offset) {
             vec![signature]
@@ -1509,7 +1790,18 @@ impl AnalysisSnapshot {
                 .saturating_sub(1),
         );
         Some(SignatureHelp {
-            signatures,
+            signatures: signatures
+                .into_iter()
+                .map(|mut signature| {
+                    signature.label = crate::compiler::typecheck::display_type(&signature.label);
+                    signature.parameters = signature
+                        .parameters
+                        .into_iter()
+                        .map(|ty| crate::compiler::typecheck::display_type(&ty))
+                        .collect();
+                    signature
+                })
+                .collect(),
             active_signature,
             active_parameter,
         })
@@ -1677,8 +1969,11 @@ struct Occurrence {
 
 #[derive(Clone)]
 struct AnalyzedFile {
-    source: String,
-    prepared: syntax::PreparedSource,
+    parsed: Arc<ParsedSource>,
+    tokens: Arc<Vec<Token>>,
+    identifiers: Arc<Vec<IdentifierToken>>,
+    symbols_by_name: Arc<HashMap<String, Vec<usize>>>,
+    standalone_diagnostics: OnceLock<Vec<Diagnostic>>,
     base_diagnostics: Vec<Diagnostic>,
     diagnostics: Vec<Diagnostic>,
     symbols: Vec<Symbol>,
@@ -1686,6 +1981,13 @@ struct AnalyzedFile {
     syntax_valid: bool,
     semantic_roles: Vec<(std::ops::Range<usize>, u32, u32)>,
     editor: editor::FileAssistance,
+}
+
+impl std::ops::Deref for AnalyzedFile {
+    type Target = ParsedSource;
+    fn deref(&self) -> &Self::Target {
+        &self.parsed
+    }
 }
 
 impl AnalyzedFile {
@@ -1699,38 +2001,71 @@ impl AnalyzedFile {
         prepared: syntax::PreparedSource,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
-        let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-        let syntax_valid = parsed.errors().is_empty();
-        let ast = parsed.into_ast();
-        Self::from_ast(source, prepared, &ast, diagnostics, syntax_valid)
+        Self::from_parsed(
+            Arc::new(ParsedSource::new_prepared(source, prepared)),
+            diagnostics,
+        )
     }
 
     fn from_ast(
         source: &str,
         prepared: syntax::PreparedSource,
         ast: &ast::Ast,
-        mut diagnostics: Vec<Diagnostic>,
+        diagnostics: Vec<Diagnostic>,
         syntax_valid: bool,
     ) -> Self {
-        if let Some(error) = syntax::invalid_type_alias_error(source) {
-            diagnostics.extend(error.diagnostics);
+        Self::from_parsed(
+            Arc::new(ParsedSource {
+                source: source.to_owned(),
+                prepared,
+                ast: ast.clone(),
+                diagnostics: diagnostics.clone(),
+                syntax_valid,
+                exports: Default::default(),
+                imports: Default::default(),
+            }),
+            diagnostics,
+        )
+    }
+
+    fn from_parsed(parsed: Arc<ParsedSource>, mut diagnostics: Vec<Diagnostic>) -> Self {
+        for diagnostic in &parsed.diagnostics {
+            if !diagnostics.contains(diagnostic) {
+                diagnostics.push(diagnostic.clone());
+            }
         }
-        let mut collector = SemanticCollector::new(source, &prepared);
+        let source = &parsed.source;
+        let prepared = &parsed.prepared;
+        let ast = &parsed.ast;
+        let mut collector = SemanticCollector::new(source, prepared);
         collector.visit_ast(ast);
         let semantic_roles = collector.tokens.clone();
         let (mut symbols, mut occurrences) = collector.finish(source);
-        if !syntax_valid {
-            recover_partial_locals(source, &prepared, &mut symbols, &mut occurrences);
+        if !parsed.syntax_valid {
+            recover_partial_locals(source, prepared, &mut symbols, &mut occurrences);
         }
-        let editor = editor::FileAssistance::collect(source, &prepared, ast);
+        occurrences.sort_by_key(|occurrence| occurrence.range.start);
+        let mut symbols_by_name = HashMap::<String, Vec<usize>>::new();
+        for symbol in &symbols {
+            symbols_by_name
+                .entry(symbol.name.clone())
+                .or_default()
+                .push(symbol.id);
+        }
+        let editor = editor::FileAssistance::collect(source, prepared, ast);
+        let tokens = Arc::new(lex(&prepared.text));
+        let identifiers = Arc::new(scan_identifiers(source));
         Self {
-            source: source.to_owned(),
-            prepared,
+            syntax_valid: parsed.syntax_valid,
+            parsed,
+            tokens,
+            identifiers,
+            symbols_by_name: Arc::new(symbols_by_name),
+            standalone_diagnostics: OnceLock::new(),
             base_diagnostics: diagnostics.clone(),
             diagnostics,
             symbols,
             occurrences,
-            syntax_valid,
             semantic_roles,
             editor,
         }
@@ -1738,10 +2073,23 @@ impl AnalyzedFile {
 
     fn occurrence_at(&self, byte_offset: usize) -> Option<&Occurrence> {
         let offset = clamp_offset(&self.source, byte_offset);
-        self.occurrences.iter().find(|occurrence| {
+        let index = self
+            .occurrences
+            .partition_point(|occurrence| occurrence.range.end < offset);
+        self.occurrences.get(index).filter(|occurrence| {
             occurrence.range.contains(&offset)
                 || (occurrence.range.end == offset && occurrence.range.start < offset)
         })
+    }
+
+    fn identifier_range_at(&self, offset: usize) -> Option<std::ops::Range<usize>> {
+        let index = self
+            .identifiers
+            .partition_point(|token| token.range.end < offset);
+        self.identifiers
+            .get(index)
+            .filter(|token| token.range.start <= offset)
+            .map(|token| token.range.clone())
     }
 
     fn member_completions(&self, offset: usize) -> Option<Vec<CompletionItem>> {
@@ -1841,8 +2189,11 @@ impl AnalyzedFile {
     }
 
     fn visible_symbol(&self, name: &str, offset: usize) -> Option<&Symbol> {
-        self.symbols
-            .iter()
+        self.symbols_by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|&id| &self.symbols[id])
             .filter(|symbol| {
                 symbol.name == name
                     && symbol.visible.start <= offset
@@ -1922,7 +2273,12 @@ fn collect_import_bindings(
     imports: &HashMap<String, crate::project::ResolvedImport>,
     files: &BTreeMap<PathBuf, Arc<AnalyzedFile>>,
 ) -> Vec<ImportBinding> {
-    let Ok(calls) = crate::compiler::collect_imports(&file.source) else {
+    let calls = if file.syntax_valid {
+        file.parsed.import_calls()
+    } else {
+        crate::compiler::imports::analyze(&file.source, &file.prepared, &file.parsed.ast, true)
+    };
+    let Ok(calls) = calls else {
         return Vec::new();
     };
     let calls = calls
@@ -1936,17 +2292,12 @@ fn collect_import_bindings(
     if calls.is_empty() {
         return Vec::new();
     }
-    let prepared = syntax::prepare(&file.source);
-    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-    if !parsed.errors().is_empty() {
-        return Vec::new();
-    }
     let mut collector = ImportBindingCollector {
-        prepared: &prepared,
+        prepared: &file.prepared,
         calls,
         bindings: Vec::new(),
     };
-    collector.visit_ast(&parsed.into_ast());
+    collector.visit_ast(&file.parsed.ast);
     collector
         .bindings
         .into_iter()
@@ -1959,7 +2310,7 @@ fn collect_import_bindings(
                 symbol,
                 target_path: import.target_path.clone(),
                 type_name: import.type_name.clone(),
-                members: exported_table_members(&target.source, &import.type_name),
+                members: exported_table_members(target, &import.type_name),
             })
         })
         .collect()
@@ -2027,7 +2378,10 @@ impl Visitor for ImportBindingCollector<'_> {
     }
 }
 
-fn exported_table_members(source: &str, export_type: &str) -> HashMap<String, ImportMember> {
+fn exported_table_members(file: &AnalyzedFile, export_type: &str) -> HashMap<String, ImportMember> {
+    let source = &file.source;
+    let prepared = &file.prepared;
+    let ast = &file.parsed.ast;
     let Some(body) = export_type
         .trim()
         .strip_prefix('{')
@@ -2045,12 +2399,6 @@ fn exported_table_members(source: &str, export_type: &str) -> HashMap<String, Im
     if field_types.is_empty() {
         return HashMap::new();
     }
-    let prepared = syntax::prepare(source);
-    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-    if !parsed.errors().is_empty() {
-        return HashMap::new();
-    }
-    let ast = parsed.into_ast();
     // shortcut: only direct returned table constructors, trace local exports when module flow supports it.
     let Some(ast::LastStmt::Return(return_statement)) = ast.nodes().last_stmt() else {
         return HashMap::new();
@@ -2291,15 +2639,21 @@ impl<'a> SemanticCollector<'a> {
                 }
             })
             .collect::<Vec<_>>();
-        let prepared = syntax::prepare(source);
+        let prepared = self.prepared;
+        let declarations = symbols
+            .iter()
+            .map(|symbol| ((symbol.range.start, symbol.range.end), symbol.id))
+            .collect::<HashMap<_, _>>();
+        let mut names = HashMap::<&str, Vec<&Symbol>>::new();
+        for symbol in &symbols {
+            names.entry(&symbol.name).or_default().push(symbol);
+        }
         let mut occurrences = Vec::new();
         for token in scan_identifiers(&prepared.text) {
             let start = prepared.original_offset(token.range.start);
             let end = prepared.original_offset(token.range.end);
             let name = token.name;
-            let declaration = symbols
-                .iter()
-                .position(|symbol| symbol.range.start == start && symbol.range.end == end);
+            let declaration = declarations.get(&(start, end)).copied();
             if let Some(symbol) = declaration {
                 occurrences.push(Occurrence {
                     symbol,
@@ -2313,17 +2667,23 @@ impl<'a> SemanticCollector<'a> {
                 continue;
             }
             if type_position
-                && !symbols.iter().any(|symbol| {
-                    symbol.kind == SymbolKind::TypeAlias
-                        && symbol.name == name
-                        && symbol.visible.start <= start
-                        && symbol.scope.contains(&start)
-                })
+                && !names
+                    .get(name.as_str())
+                    .into_iter()
+                    .flatten()
+                    .any(|symbol| {
+                        symbol.kind == SymbolKind::TypeAlias
+                            && symbol.name == name
+                            && symbol.visible.start <= start
+                            && symbol.scope.contains(&start)
+                    })
             {
                 continue;
             }
-            let resolved = symbols
-                .iter()
+            let resolved = names
+                .get(name.as_str())
+                .into_iter()
+                .flatten()
                 .filter(|symbol| {
                     symbol.name == name
                         && if type_position {
@@ -2749,6 +3109,7 @@ struct BuiltinSymbol {
 }
 
 fn hover_markdown(detail: &str, documentation: &str) -> String {
+    let detail = crate::compiler::typecheck::display_type(detail);
     let mut contents = format!("```luat\n{detail}\n```");
     let documentation = Documentation::parse(documentation).render();
     if !documentation.trim().is_empty() {
@@ -3002,6 +3363,7 @@ fn scan_identifiers(source: &str) -> Vec<IdentifierToken> {
     result
 }
 
+#[derive(Clone)]
 struct IdentifierToken {
     name: String,
     range: std::ops::Range<usize>,
@@ -4198,6 +4560,49 @@ mod nui_definition_tests {
 #[cfg(test)]
 mod semantic_edge_tests {
     use super::*;
+
+    #[test]
+    fn typedef_keyword_has_no_partial_function_token() {
+        let path = PathBuf::from("keyword.luat");
+        let mut host = AnalysisHost::new();
+        host.set_file(
+            path.clone(),
+            "typedef User = { id: number }\nlocal kind = type(1)".into(),
+        );
+        let snapshot = host.editor_snapshot();
+        assert!(
+            !snapshot
+                .semantic_tokens(&path)
+                .iter()
+                .any(|(range, _, _)| range.start < 7)
+        );
+        let start = snapshot.source(&path).unwrap().find("type(1)").unwrap();
+        assert!(
+            snapshot
+                .semantic_tokens(&path)
+                .iter()
+                .any(|(range, kind, _)| *range == (start..start + 4) && *kind == 3)
+        );
+    }
+
+    #[test]
+    fn editor_snapshots_share_parsing_and_preserve_old_buffers() {
+        let path = PathBuf::from("cached.luat");
+        let mut host = AnalysisHost::new();
+        host.set_file(path.clone(), "local value = 1\nprint(value)".into());
+        let first = host.editor_snapshot();
+        let second = host.editor_snapshot();
+        assert!(Arc::ptr_eq(&first.files[&path], &second.files[&path]));
+        let checked = host.snapshot();
+        assert!(Arc::ptr_eq(
+            &first.files[&path].parsed,
+            &checked.files[&path].parsed
+        ));
+        host.set_file(path.clone(), "local value = 2\nprint(value)".into());
+        let changed = host.editor_snapshot();
+        assert_ne!(first.source(&path), changed.source(&path));
+        assert!(first.source(&path).unwrap().contains("= 1"));
+    }
     #[test]
     fn readonly_respects_same_line_declarations_shadowing_and_unicode() {
         let path = PathBuf::from("edges.luat");
