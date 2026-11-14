@@ -63,7 +63,7 @@ fn nested_callback_record_hover_keeps_plain_fields_and_empty_parameters() {
 #[test]
 fn callback_record_hover_handles_method_access_and_explicit_self() {
     let source = "local service = { current = player, getName = function(self): string return self.current.name end }\nlocal currentName = service:getName()\nservice.getName(service)";
-    let (snapshot, path) = analyze(&source);
+    let (snapshot, path) = analyze(source);
     for (call, expected) in [
         ("service:getName()", "function service:getName(): string"),
         ("service.getName(service)", "function service.getName("),
@@ -82,7 +82,7 @@ fn callback_record_hover_handles_method_access_and_explicit_self() {
 #[test]
 fn template_interpolations_keep_member_semantic_tokens() {
     let source = "local player = { name = 'Ada' }\nlocal status = 'ready'\nlocal greeting = `Hoş geldin, {player.name}! Durum: {status}.`";
-    let (snapshot, path) = analyze(&source);
+    let (snapshot, path) = analyze(source);
     let tokens = snapshot.semantic_tokens(&path);
     for name in ["player", "name", "status"] {
         let start = source.rfind(name).unwrap();
