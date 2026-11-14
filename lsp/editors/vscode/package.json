@@ -1,6 +1,6 @@
 {
 	"name": "luat-vscode",
-	"displayName": "LuaT Language Support",
+	"displayName": "LuaT for Visual Studio Code",
 	"description": "Language support for typed Lua targeting CfxLua.",
 	"icon": "images/logo.png",
 	"publisher": "luat",
