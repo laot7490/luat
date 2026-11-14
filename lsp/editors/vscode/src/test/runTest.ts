@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { runTests } from '@vscode/test-electron';
 
@@ -13,6 +14,7 @@ const extensionRoot = path.resolve(__dirname, '../..');
 	}
 	process.env.LUAT_LSP_SERVER = server;
 	const workspace = path.join(extensionRoot, 'out', 'test', 'workspace');
+	await fs.mkdir(workspace, { recursive: true });
 	await runTests({
 		extensionDevelopmentPath: extensionRoot,
 		extensionTestsPath: path.join(extensionRoot, 'out', 'test', 'suite', 'index'),
