@@ -30,8 +30,21 @@ use tower_lsp_server::{
 #[derive(Clone)]
 struct Document {
     path: PathBuf,
-    text: String,
+    text: Arc<String>,
     version: i32,
+    index: Arc<LineIndex>,
+}
+
+struct RequestSnapshot {
+    analysis: AnalysisSnapshot,
+    generation: u64,
+}
+
+impl std::ops::Deref for RequestSnapshot {
+    type Target = AnalysisSnapshot;
+    fn deref(&self) -> &Self::Target {
+        &self.analysis
+    }
 }
 
 struct Backend {
@@ -41,20 +54,29 @@ struct Backend {
     generation: Arc<AtomicU64>,
     analysis: Arc<tokio::sync::Mutex<()>>,
     settings: Arc<RwLock<EditorSettings>>,
-    inlay_refresh: std::sync::atomic::AtomicBool,
+    inlay_refresh: Arc<std::sync::atomic::AtomicBool>,
+    semantic_refresh: Arc<std::sync::atomic::AtomicBool>,
+    editor: tokio::sync::Mutex<()>,
+    pending: Arc<tokio::sync::Notify>,
 }
 
 impl Backend {
     fn new(client: Client) -> Self {
-        Self {
+        let backend = Self {
             client,
             host: Arc::new(RwLock::new(AnalysisHost::new())),
             documents: Arc::new(RwLock::new(BTreeMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             analysis: Arc::new(tokio::sync::Mutex::new(())),
             settings: Arc::new(RwLock::new(EditorSettings::default())),
-            inlay_refresh: std::sync::atomic::AtomicBool::new(false),
-        }
+            inlay_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            semantic_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            editor: tokio::sync::Mutex::new(()),
+            pending: Arc::new(tokio::sync::Notify::new()),
+        };
+        backend.start_analysis_worker();
+        tokio::task::spawn_blocking(AnalysisHost::warm_builtins);
+        backend
     }
 
     async fn set_document(&self, uri: Uri, path: PathBuf, text: String, version: i32) {
@@ -64,7 +86,8 @@ impl Backend {
             uri.clone(),
             Document {
                 path: path.clone(),
-                text: text.clone(),
+                index: Arc::new(LineIndex::new(&text)),
+                text: Arc::new(text),
                 version,
             },
         );
@@ -72,106 +95,178 @@ impl Backend {
     }
 
     async fn schedule_analysis(&self) {
-        let revision = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.pending.notify_one();
+    }
+
+    fn start_analysis_worker(&self) {
         let shared_host = Arc::clone(&self.host);
         let documents = Arc::clone(&self.documents);
         let generation = Arc::clone(&self.generation);
         let analysis = Arc::clone(&self.analysis);
         let client = self.client.clone();
         let settings = Arc::clone(&self.settings);
+        let pending = Arc::clone(&self.pending);
+        let inlay_refresh = Arc::clone(&self.inlay_refresh);
+        let semantic_refresh = Arc::clone(&self.semantic_refresh);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let _analysis = analysis.lock().await;
-            if generation.load(Ordering::Relaxed) != revision {
-                return;
-            }
-            let host = shared_host.read().await.clone();
-            let snapshot = tokio::task::spawn_blocking(move || {
-                let mut host = host;
-                let snapshot = host.snapshot();
-                (host, snapshot)
-            })
-            .await;
-            let Ok((host, snapshot)) = snapshot else {
-                return;
-            };
-            {
-                let mut current = shared_host.write().await;
-                if generation.load(Ordering::Relaxed) != revision {
-                    return;
+            let mut indexed = false;
+            loop {
+                pending.notified().await;
+                while indexed {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(150)) => break,
+                        _ = pending.notified() => {}
+                    }
                 }
-                *current = host;
-            }
-            let current = documents.read().await;
-            if generation.load(Ordering::Relaxed) != revision {
-                return;
-            }
-            let settings = settings.read().await.clone();
-            let published = current
-                .iter()
-                .map(|(uri, document)| {
-                    let mut diagnostics: Vec<_> = snapshot
-                        .diagnostics(&document.path)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|diagnostic| LspDiagnostic {
-                            range: byte_range_to_lsp(
-                                &document.text,
-                                diagnostic.source_range.clone(),
-                            ),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: Some(diagnostic.code.into()),
-                            source: Some("LuaT".to_owned()),
-                            message: diagnostic.message.clone(),
-                            ..Default::default()
-                        })
-                        .collect();
-                    diagnostics.extend(editor_diagnostics(&snapshot, document, &settings));
-                    (uri.clone(), diagnostics, document.version)
+                let _analysis = analysis.lock().await;
+                let revision = generation.load(Ordering::SeqCst);
+                let mut host = shared_host.read().await.clone();
+                let cancelled = Arc::clone(&generation);
+                let computed = tokio::task::spawn_blocking(move || {
+                    let snapshot =
+                        host.snapshot_cancellable(&|| cancelled.load(Ordering::SeqCst) != revision);
+                    (host, snapshot)
                 })
-                .collect::<Vec<_>>();
-            drop(current);
-            for (uri, diagnostics, version) in published {
-                if generation.load(Ordering::Relaxed) != revision {
-                    return;
+                .await;
+                let Ok((host, Some(snapshot))) = computed else {
+                    continue;
+                };
+                indexed = true;
+                {
+                    let mut current = shared_host.write().await;
+                    if generation.load(Ordering::SeqCst) != revision {
+                        continue;
+                    }
+                    *current = host;
                 }
-                client
-                    .publish_diagnostics(uri, diagnostics, Some(version))
-                    .await;
+                let current = documents.read().await;
+                if generation.load(Ordering::SeqCst) != revision {
+                    continue;
+                }
+                let settings = settings.read().await.clone();
+                let published = current
+                    .iter()
+                    .filter_map(|(uri, document)| {
+                        if snapshot.source(&document.path) != Some(document.text.as_str()) {
+                            return None;
+                        }
+                        let mut diagnostics: Vec<_> = snapshot
+                            .diagnostics(&document.path)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|diagnostic| LspDiagnostic {
+                                range: document
+                                    .index
+                                    .range(&document.text, diagnostic.source_range.clone()),
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                code: Some(diagnostic.code.into()),
+                                source: Some("LuaT".to_owned()),
+                                message: diagnostic.message.clone(),
+                                ..Default::default()
+                            })
+                            .collect();
+                        diagnostics.extend(editor_diagnostics(&snapshot, document, &settings));
+                        Some((uri.clone(), diagnostics, document.version))
+                    })
+                    .collect::<Vec<_>>();
+                drop(current);
+                drop(_analysis);
+                for (uri, diagnostics, version) in published {
+                    if generation.load(Ordering::SeqCst) != revision {
+                        break;
+                    }
+                    client
+                        .publish_diagnostics(uri, diagnostics, Some(version))
+                        .await;
+                }
+                if generation.load(Ordering::SeqCst) != revision {
+                    continue;
+                }
+                if semantic_refresh.load(Ordering::Relaxed) {
+                    let _ = client.semantic_tokens_refresh().await;
+                }
+                if inlay_refresh.load(Ordering::Relaxed) {
+                    let _ = client.inlay_hint_refresh().await;
+                }
             }
         });
     }
 
-    async fn snapshot(&self) -> Option<AnalysisSnapshot> {
-        let _analysis = self.analysis.lock().await;
-        loop {
-            let revision = self.generation.load(Ordering::Relaxed);
-            let host = self.host.read().await.clone();
-            let (host, snapshot) = tokio::task::spawn_blocking(move || {
-                let mut host = host;
-                let snapshot = host.snapshot();
-                (host, snapshot)
-            })
-            .await
-            .ok()?;
-            let mut current = self.host.write().await;
-            if self.generation.load(Ordering::Relaxed) != revision {
-                continue;
-            }
-            *current = host;
-            return Some(snapshot);
+    async fn editor_snapshot(&self, document: &Document) -> Result<Option<RequestSnapshot>> {
+        let _editor = self.editor.lock().await;
+        let revision = self.generation.load(Ordering::SeqCst);
+        let mut host = self.host.read().await.clone();
+        let (host, snapshot) = tokio::task::spawn_blocking(move || {
+            let snapshot = host.editor_snapshot();
+            (host, snapshot)
+        })
+        .await
+        .map_err(|_| tower_lsp_server::jsonrpc::Error::internal_error())?;
+        let mut current = self.host.write().await;
+        if self.generation.load(Ordering::SeqCst) != revision
+            || snapshot.source(&document.path) != Some(document.text.as_str())
+        {
+            return Err(tower_lsp_server::jsonrpc::Error::content_modified());
         }
+        current.adopt_editor_cache(&host);
+        Ok(Some(RequestSnapshot {
+            analysis: snapshot,
+            generation: revision,
+        }))
+    }
+
+    async fn snapshot(&self) -> Result<Option<RequestSnapshot>> {
+        let _analysis = self.analysis.lock().await;
+        let revision = self.generation.load(Ordering::SeqCst);
+        let mut host = self.host.read().await.clone();
+        let cancelled = Arc::clone(&self.generation);
+        let (host, snapshot) = tokio::task::spawn_blocking(move || {
+            let snapshot =
+                host.snapshot_cancellable(&|| cancelled.load(Ordering::SeqCst) != revision);
+            (host, snapshot)
+        })
+        .await
+        .map_err(|_| tower_lsp_server::jsonrpc::Error::internal_error())?;
+        let mut current = self.host.write().await;
+        if self.generation.load(Ordering::SeqCst) != revision {
+            return Err(tower_lsp_server::jsonrpc::Error::content_modified());
+        }
+        *current = host;
+        Ok(snapshot.map(|analysis| RequestSnapshot {
+            analysis,
+            generation: revision,
+        }))
     }
 
     async fn document(&self, uri: &Uri) -> Option<Document> {
         self.documents.read().await.get(uri).cloned()
     }
 
-    async fn location(&self, range: &FileRange) -> Option<Location> {
+    async fn snapshot_for_document(&self, document: &Document) -> Result<Option<RequestSnapshot>> {
+        let snapshot = self.snapshot().await?;
+        if snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.source(&document.path))
+            != Some(document.text.as_str())
+        {
+            return Err(tower_lsp_server::jsonrpc::Error::content_modified());
+        }
+        Ok(snapshot)
+    }
+
+    fn response<T>(&self, snapshot: &RequestSnapshot, value: T) -> Result<T> {
+        if self.generation.load(Ordering::SeqCst) != snapshot.generation {
+            return Err(tower_lsp_server::jsonrpc::Error::content_modified());
+        }
+        Ok(value)
+    }
+
+    fn location(&self, range: &FileRange, snapshot: &AnalysisSnapshot) -> Option<Location> {
         let uri = Uri::from_file_path(&range.path)?;
-        let source = match self.document(&uri).await {
-            Some(document) => document.text,
-            None => std::fs::read_to_string(&range.path).ok()?,
+        let source = match snapshot.source(&range.path) {
+            Some(source) => std::borrow::Cow::Borrowed(source),
+            None => std::borrow::Cow::Owned(std::fs::read_to_string(&range.path).ok()?),
         };
         Some(Location::new(
             uri,
@@ -182,6 +277,16 @@ impl Backend {
 
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        self.semantic_refresh.store(
+            params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.semantic_tokens.as_ref())
+                .and_then(|tokens| tokens.refresh_support)
+                .unwrap_or(false),
+            Ordering::Relaxed,
+        );
         if let Some(options) = params.initialization_options {
             *self.settings.write().await = EditorSettings::from_value(&options);
         }
@@ -245,13 +350,13 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
         let Some(source) = snapshot.source(&document.path) else {
             return Ok(None);
         };
-        let index = LineIndex::new(source);
+        let index = &document.index;
         let mut previous = Position::new(0, 0);
         let data = snapshot
             .semantic_tokens(&document.path)
@@ -278,10 +383,13 @@ impl LanguageServer for Backend {
                 })
             })
             .collect();
-        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data,
-        })))
+        self.response(
+            &snapshot,
+            Some(SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data,
+            })),
+        )
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -311,16 +419,16 @@ impl LanguageServer for Backend {
                 let start = index.position_to_offset(&document.text, range.start);
                 let end = index.position_to_offset(&document.text, range.end);
                 if start <= end {
-                    document.text.replace_range(start..end, &change.text);
+                    Arc::make_mut(&mut document.text).replace_range(start..end, &change.text);
                 }
             } else {
-                document.text = change.text;
+                document.text = Arc::new(change.text);
             }
         }
         self.set_document(
             uri,
             document.path,
-            document.text,
+            document.text.as_ref().clone(),
             params.text_document.version,
         )
         .await;
@@ -347,15 +455,24 @@ impl LanguageServer for Backend {
         let changed_paths = params
             .changes
             .into_iter()
-            .filter_map(|change| change.uri.to_file_path().map(PathBuf::from))
+            .filter_map(|change| {
+                change
+                    .uri
+                    .to_file_path()
+                    .map(|path| (PathBuf::from(path), change.typ))
+            })
             .collect::<Vec<_>>();
         if changed_paths.is_empty() {
             return;
         }
         self.generation.fetch_add(1, Ordering::Relaxed);
         let mut host = self.host.write().await;
-        for path in changed_paths {
-            host.invalidate_path(&path);
+        for (path, kind) in changed_paths {
+            if kind == lsp::FileChangeType::CHANGED {
+                host.invalidate_file(&path);
+            } else {
+                host.invalidate_path(&path);
+            }
         }
         drop(host);
         self.schedule_analysis().await;
@@ -366,9 +483,10 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, position.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, position.position);
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
         let items = snapshot
@@ -396,7 +514,7 @@ impl LanguageServer for Backend {
                 ..Default::default()
             })
             .collect();
-        Ok(Some(CompletionResponse::Array(items)))
+        self.response(&snapshot, Some(CompletionResponse::Array(items)))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -404,20 +522,23 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
         let Some(source) = snapshot.source(&document.path) else {
             return Ok(None);
         };
         let offset = LineIndex::new(source).position_to_offset(source, position.position);
-        Ok(snapshot.hover(&document.path, offset).map(|result| Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: result.contents,
+        self.response(
+            &snapshot,
+            snapshot.hover(&document.path, offset).map(|result| Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: result.contents,
+                }),
+                range: Some(byte_range_to_lsp(source, result.range)),
             }),
-            range: Some(byte_range_to_lsp(source, result.range)),
-        }))
+        )
     }
 
     async fn signature_help(
@@ -428,39 +549,44 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, position.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, position.position);
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
-        Ok(snapshot
-            .signature_help(&document.path, offset)
-            .map(|help| LspSignatureHelp {
-                signatures: help
-                    .signatures
-                    .into_iter()
-                    .map(|signature| LspSignatureInformation {
-                        label: signature.label,
-                        parameters: Some(
-                            signature
-                                .parameters
-                                .into_iter()
-                                .zip(signature.parameter_documentation)
-                                .map(|(label, documentation)| {
-                                    tower_lsp_server::ls_types::ParameterInformation {
-                                        label: ParameterLabel::Simple(label),
-                                        documentation: documentation.map(markdown_documentation),
-                                    }
-                                })
-                                .collect(),
-                        ),
-                        documentation: signature.documentation.map(markdown_documentation),
-                        active_parameter: None,
-                    })
-                    .collect(),
-                active_signature: Some(help.active_signature as u32),
-                active_parameter: Some(help.active_parameter as u32),
-            }))
+        self.response(
+            &snapshot,
+            snapshot
+                .signature_help(&document.path, offset)
+                .map(|help| LspSignatureHelp {
+                    signatures: help
+                        .signatures
+                        .into_iter()
+                        .map(|signature| LspSignatureInformation {
+                            label: signature.label,
+                            parameters: Some(
+                                signature
+                                    .parameters
+                                    .into_iter()
+                                    .zip(signature.parameter_documentation)
+                                    .map(|(label, documentation)| {
+                                        tower_lsp_server::ls_types::ParameterInformation {
+                                            label: ParameterLabel::Simple(label),
+                                            documentation: documentation
+                                                .map(markdown_documentation),
+                                        }
+                                    })
+                                    .collect(),
+                            ),
+                            documentation: signature.documentation.map(markdown_documentation),
+                            active_parameter: None,
+                        })
+                        .collect(),
+                    active_signature: Some(help.active_signature as u32),
+                    active_parameter: Some(help.active_parameter as u32),
+                }),
+        )
     }
 
     async fn goto_definition(
@@ -471,16 +597,17 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, position.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, position.position);
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
         let location = match snapshot.definition(&document.path, offset) {
-            Some(range) => self.location(&range).await,
+            Some(range) => self.location(&range, &snapshot),
             None => None,
         };
-        Ok(location.map(GotoDefinitionResponse::Scalar))
+        self.response(&snapshot, location.map(GotoDefinitionResponse::Scalar))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -488,19 +615,20 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, position.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, position.position);
+        let Some(snapshot) = self.snapshot_for_document(&document).await? else {
             return Ok(None);
         };
         let include = params.context.include_declaration;
         let mut locations = Vec::new();
         for range in snapshot.references(&document.path, offset, include) {
-            if let Some(location) = self.location(&range).await {
+            if let Some(location) = self.location(&range, &snapshot) {
                 locations.push(location);
             }
         }
-        Ok(Some(locations))
+        self.response(&snapshot, Some(locations))
     }
 
     async fn prepare_rename(
@@ -510,9 +638,10 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, params.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, params.position);
+        let Some(snapshot) = self.snapshot_for_document(&document).await? else {
             return Ok(None);
         };
         let Some(hover) = snapshot.hover(&document.path, offset) else {
@@ -526,12 +655,15 @@ impl LanguageServer for Backend {
         if snapshot.rename(&document.path, offset, &name).is_err() {
             return Ok(None);
         }
-        Ok(Some(
-            tower_lsp_server::ls_types::PrepareRenameResponse::RangeWithPlaceholder {
-                range: byte_range_to_lsp(&document.text, hover.range),
-                placeholder: name,
-            },
-        ))
+        self.response(
+            &snapshot,
+            Some(
+                tower_lsp_server::ls_types::PrepareRenameResponse::RangeWithPlaceholder {
+                    range: byte_range_to_lsp(&document.text, hover.range),
+                    placeholder: name,
+                },
+            ),
+        )
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -539,9 +671,10 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&position.text_document.uri).await else {
             return Ok(None);
         };
-        let offset =
-            LineIndex::new(&document.text).position_to_offset(&document.text, position.position);
-        let Some(snapshot) = self.snapshot().await else {
+        let offset = document
+            .index
+            .position_to_offset(&document.text, position.position);
+        let Some(snapshot) = self.snapshot_for_document(&document).await? else {
             return Ok(None);
         };
         let Ok(edit) = snapshot.rename(&document.path, offset, &params.new_name) else {
@@ -552,12 +685,7 @@ impl LanguageServer for Backend {
             let Some(uri) = Uri::from_file_path(&path) else {
                 return Ok(None);
             };
-            let source = self
-                .document(&uri)
-                .await
-                .map(|document| document.text)
-                .or_else(|| std::fs::read_to_string(&path).ok());
-            let Some(source) = source else {
+            let Some(source) = snapshot.source(&path) else {
                 return Ok(None);
             };
             changes.insert(
@@ -568,10 +696,13 @@ impl LanguageServer for Backend {
                     .collect(),
             );
         }
-        Ok(Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }))
+        self.response(
+            &snapshot,
+            Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+        )
     }
 
     async fn did_change_configuration(&self, params: lsp::DidChangeConfigurationParams) {
@@ -589,23 +720,26 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
-        Ok(Some(lsp::DocumentSymbolResponse::Nested(
-            snapshot
-                .document_symbols(&document.path)
-                .into_iter()
-                .map(|symbol| document_symbol(&document.text, symbol))
-                .collect(),
-        )))
+        self.response(
+            &snapshot,
+            Some(lsp::DocumentSymbolResponse::Nested(
+                snapshot
+                    .document_symbols(&document.path)
+                    .into_iter()
+                    .map(|symbol| document_symbol(&document.text, symbol))
+                    .collect(),
+            )),
+        )
     }
 
     async fn symbol(
         &self,
         params: lsp::WorkspaceSymbolParams,
     ) -> Result<Option<lsp::WorkspaceSymbolResponse>> {
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.snapshot().await? else {
             return Ok(None);
         };
         let mut symbols = Vec::new();
@@ -626,7 +760,7 @@ impl LanguageServer for Backend {
                 container_name: None,
             });
         }
-        Ok(Some(lsp::WorkspaceSymbolResponse::Flat(symbols)))
+        self.response(&snapshot, Some(lsp::WorkspaceSymbolResponse::Flat(symbols)))
     }
 
     async fn inlay_hint(
@@ -640,37 +774,40 @@ impl LanguageServer for Backend {
         if !settings.parameter_names && !settings.variable_types {
             return Ok(Some(Vec::new()));
         }
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
-        let index = LineIndex::new(&document.text);
+        let index = &document.index;
         let start = index.position_to_offset(&document.text, params.range.start);
         let end = index.position_to_offset(&document.text, params.range.end);
-        Ok(Some(
-            snapshot
-                .inlay_hints(
-                    &document.path,
-                    start..end,
-                    settings.parameter_names,
-                    settings.variable_types,
-                )
-                .into_iter()
-                .map(|hint| lsp::InlayHint {
-                    position: index.offset_to_position(&document.text, hint.offset),
-                    label: lsp::InlayHintLabel::String(hint.label),
-                    kind: Some(if hint.parameter {
-                        lsp::InlayHintKind::PARAMETER
-                    } else {
-                        lsp::InlayHintKind::TYPE
-                    }),
-                    padding_right: hint.parameter.then_some(true),
-                    padding_left: None,
-                    text_edits: None,
-                    tooltip: None,
-                    data: None,
-                })
-                .collect(),
-        ))
+        self.response(
+            &snapshot,
+            Some(
+                snapshot
+                    .inlay_hints(
+                        &document.path,
+                        start..end,
+                        settings.parameter_names,
+                        settings.variable_types,
+                    )
+                    .into_iter()
+                    .map(|hint| lsp::InlayHint {
+                        position: index.offset_to_position(&document.text, hint.offset),
+                        label: lsp::InlayHintLabel::String(hint.label),
+                        kind: Some(if hint.parameter {
+                            lsp::InlayHintKind::PARAMETER
+                        } else {
+                            lsp::InlayHintKind::TYPE
+                        }),
+                        padding_right: hint.parameter.then_some(true),
+                        padding_left: None,
+                        text_edits: None,
+                        tooltip: None,
+                        data: None,
+                    })
+                    .collect(),
+            ),
+        )
     }
 
     async fn code_action(
@@ -687,7 +824,7 @@ impl LanguageServer for Backend {
         let Some(document) = self.document(&params.text_document.uri).await else {
             return Ok(None);
         };
-        let Some(snapshot) = self.snapshot().await else {
+        let Some(snapshot) = self.editor_snapshot(&document).await? else {
             return Ok(None);
         };
         let settings = self.settings.read().await.clone();
@@ -734,7 +871,7 @@ impl LanguageServer for Backend {
                 ..Default::default()
             }));
         }
-        Ok(Some(actions))
+        self.response(&snapshot, Some(actions))
     }
 }
 
@@ -744,6 +881,13 @@ struct LineIndex {
 }
 
 impl LineIndex {
+    fn range(&self, source: &str, range: std::ops::Range<usize>) -> lsp::Range {
+        lsp::Range::new(
+            self.offset_to_position(source, range.start),
+            self.offset_to_position(source, range.end),
+        )
+    }
+
     fn new(source: &str) -> Self {
         let mut starts = vec![0];
         starts.extend(source.match_indices('\n').map(|(index, _)| index + 1));

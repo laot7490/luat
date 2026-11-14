@@ -1,5 +1,5 @@
 mod config;
-mod imports;
+pub(crate) mod imports;
 mod manifest;
 
 use config::FiveMConfig;
@@ -378,15 +378,6 @@ impl Project {
         &self.warnings
     }
 
-    pub(crate) fn editor_contexts(
-        &self,
-        overlays: &std::collections::HashMap<PathBuf, String>,
-    ) -> std::collections::HashMap<PathBuf, Vec<crate::ExecutionContext>> {
-        self.analyze_imports_with_overlays(overlays)
-            .map(|plan| plan.execution_contexts)
-            .unwrap_or_default()
-    }
-
     pub fn declaration_files(&self) -> &[PathBuf] {
         &self.declarations
     }
@@ -409,37 +400,98 @@ impl Project {
         self.check_current_with_overlays(overlays)
     }
 
-    pub(crate) fn check_changed_with_overlays_and_imports(
-        &self,
-        overlays: &HashMap<PathBuf, String>,
-        changed_paths: &BTreeSet<PathBuf>,
-    ) -> (
-        BTreeSet<PathBuf>,
-        Result<(), BuildError>,
-        Option<ResolvedImports>,
-    ) {
-        let (checked_paths, result, imports) =
-            self.check_selected_with_overlays(overlays, Some(changed_paths), None);
-        (checked_paths, result.map(|_| ()), imports)
-    }
-
-    pub(crate) fn check_changed_with_declarations_and_imports(
-        &self,
-        overlays: &HashMap<PathBuf, String>,
-        changed_paths: &BTreeSet<PathBuf>,
-        declarations: &DeclarationSet,
-    ) -> (
-        BTreeSet<PathBuf>,
-        Result<(), BuildError>,
-        Option<ResolvedImports>,
-    ) {
-        let (checked_paths, result, imports) =
-            self.check_selected_with_overlays(overlays, Some(changed_paths), Some(declarations));
-        (checked_paths, result.map(|_| ()), imports)
-    }
-
     fn check_current(&self) -> Result<BuildResult, BuildError> {
         self.check_current_with_overlays(&std::collections::HashMap::new())
+    }
+
+    pub(crate) fn check_editor_with_plan(
+        &self,
+        plan: &imports::ImportPlan,
+        previous: Option<&imports::ImportPlan>,
+        changed: &BTreeSet<PathBuf>,
+        declarations: &DeclarationSet,
+        parse: &dyn Fn(
+            &Path,
+            &str,
+        )
+            -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError>,
+    ) -> (BTreeSet<PathBuf>, Result<(), BuildError>, ResolvedImports) {
+        let source_paths = self
+            .source_paths()
+            .map(Path::to_path_buf)
+            .collect::<BTreeSet<_>>();
+        let interfaces = changed
+            .iter()
+            .filter(|path| {
+                previous.is_none_or(|old| {
+                    old.exports.get(*path) != plan.exports.get(*path)
+                        || old.resolved.get(*path) != plan.resolved.get(*path)
+                }) || *path == &self.config_path
+                    || self.declarations.contains(path)
+            })
+            .cloned()
+            .collect();
+        let mut checked = if previous.is_none() {
+            self.source_paths().map(Path::to_path_buf).collect()
+        } else {
+            self.dependent_source_paths(plan, &interfaces)
+        };
+        checked.extend(changed.intersection(&source_paths).cloned());
+        if let Some(old) = previous {
+            for path in plan.texts.keys().chain(old.texts.keys()) {
+                if !old.texts.contains_key(path)
+                    || !plan.texts.contains_key(path)
+                    || old.execution_contexts.get(path) != plan.execution_contexts.get(path)
+                    || old.import_types.get(path) != plan.import_types.get(path)
+                {
+                    checked.insert(path.clone());
+                }
+            }
+        }
+        checked.retain(|path| source_paths.contains(path));
+        let mut errors = Vec::new();
+        for file in &self.sources {
+            if file.output.is_none() || !checked.contains(&file.input) {
+                continue;
+            }
+            let Some(source) = plan.texts.get(&file.input) else {
+                continue;
+            };
+            let parsed = match parse(&file.input, source) {
+                Ok(parsed) => parsed,
+                Err(error) => return (checked, Err(error), self.resolved_imports(plan)),
+            };
+            let contexts = plan
+                .execution_contexts
+                .get(&file.input)
+                .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
+                .filter(|contexts| !contexts.is_empty())
+                .unwrap_or_else(|| vec![None]);
+            let mut diagnostics = Vec::new();
+            for context in contexts {
+                if let Err(error) = parsed.check(
+                    declarations,
+                    true,
+                    plan.import_types.get(&file.input),
+                    context,
+                ) {
+                    for diagnostic in error.diagnostics {
+                        if !diagnostics.contains(&diagnostic) {
+                            diagnostics.push(diagnostic);
+                        }
+                    }
+                }
+            }
+            if !diagnostics.is_empty() {
+                errors.push((file.input.clone(), CompileError { diagnostics }));
+            }
+        }
+        let result = if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(compile_errors(errors))
+        };
+        (checked, result, self.resolved_imports(plan))
     }
 
     fn check_current_with_overlays(
@@ -526,7 +578,7 @@ impl Project {
         (checked_paths, Ok(self.result(None, &plan)), Some(imports))
     }
 
-    fn resolved_imports(&self, plan: &imports::ImportPlan) -> ResolvedImports {
+    pub(crate) fn resolved_imports(&self, plan: &imports::ImportPlan) -> ResolvedImports {
         let paths = self
             .sources
             .iter()
@@ -579,32 +631,15 @@ impl Project {
         {
             return all_paths;
         }
-        let path_by_id = self
-            .sources
-            .iter()
-            .filter_map(|file| {
-                let output = file.output.as_ref()?;
-                let id = output
-                    .with_extension("")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                Some((id, file.input.clone()))
-            })
-            .collect::<HashMap<_, _>>();
         let mut affected = changed_paths.clone();
-        loop {
-            let mut grew = false;
-            for (importer, imports) in &plan.resolved {
-                if imports.values().any(|id| {
-                    path_by_id
-                        .get(id)
-                        .is_some_and(|path| affected.contains(path))
-                }) {
-                    grew |= affected.insert(importer.clone());
+        let mut pending = changed_paths.iter().cloned().collect::<Vec<_>>();
+        while let Some(path) = pending.pop() {
+            if let Some(dependents) = plan.dependents.get(&path) {
+                for dependent in dependents {
+                    if affected.insert(dependent.clone()) {
+                        pending.push(dependent.clone());
+                    }
                 }
-            }
-            if !grew {
-                break;
             }
         }
         affected.retain(|path| all_paths.contains(path));
