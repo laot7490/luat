@@ -86,7 +86,10 @@ fn template_interpolations_keep_member_semantic_tokens() {
     let tokens = snapshot.semantic_tokens(&path);
     for name in ["player", "name", "status"] {
         let start = source.rfind(name).unwrap();
-        let token = tokens.iter().find(|(range, _, _)| range.start == start).unwrap();
+        let token = tokens
+            .iter()
+            .find(|(range, _, _)| range.start == start)
+            .unwrap();
         assert_eq!(&source[token.0.clone()], name);
     }
 }
