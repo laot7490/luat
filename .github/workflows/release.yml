@@ -3,7 +3,7 @@ run-name: Release - ${{ inputs.product || 'changed products' }} - ${{ inputs.rel
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
     inputs:
       product:
