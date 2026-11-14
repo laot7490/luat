@@ -42,11 +42,11 @@ impl Documentation {
                     result.returns.push(rest.trim().to_owned());
                     continue;
                 }
-                if let Some(rest) = trimmed.strip_prefix("@deprecated") {
-                    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                        result.deprecated = Some(rest.trim().to_owned());
-                        continue;
-                    }
+                if let Some(rest) = trimmed.strip_prefix("@deprecated")
+                    && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                {
+                    result.deprecated = Some(rest.trim().to_owned());
+                    continue;
                 }
             }
             prose.push(line);

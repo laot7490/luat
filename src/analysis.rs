@@ -34,10 +34,10 @@ fn declaration_sources(
         if let Ok(entries) = fs::read_dir(parent) {
             for entry in entries.flatten() {
                 let sibling = entry.path();
-                if sibling.to_string_lossy().ends_with(".d.luat") {
-                    if let Ok(text) = fs::read_to_string(&sibling) {
-                        texts.insert(sibling, text);
-                    }
+                if sibling.to_string_lossy().ends_with(".d.luat")
+                    && let Ok(text) = fs::read_to_string(&sibling)
+                {
+                    texts.insert(sibling, text);
                 }
             }
         }
@@ -1184,15 +1184,14 @@ impl AnalysisSnapshot {
                             file.visible_symbol(receiver, offset)
                                 .is_some_and(|symbol| symbol.id == binding.symbol)
                         })
+                    && let Some(member) = binding.members.get(label)
                 {
-                    if let Some(member) = binding.members.get(label) {
-                        return self
-                            .files
-                            .get(&binding.target_path)
-                            .map_or_else(String::new, |target| {
-                                documentation_before(&target.source, member.range.start)
-                            });
-                    }
+                    return self
+                        .files
+                        .get(&binding.target_path)
+                        .map_or_else(String::new, |target| {
+                            documentation_before(&target.source, member.range.start)
+                        });
                 }
                 if let Some(symbol) = builtin_index()
                     .get(&format!("{receiver}.{label}"))
@@ -1206,15 +1205,14 @@ impl AnalysisSnapshot {
         if let Some(symbol) = file.visible_symbol(label, offset) {
             return documentation_before(&file.source, symbol.range.start);
         }
-        if let Some(root) = nearest_project_root(path) {
-            if let Some(symbol) = self
+        if let Some(root) = nearest_project_root(path)
+            && let Some(symbol) = self
                 .project_symbols
                 .get(&root)
                 .and_then(|symbols| symbols.get(label))
                 .and_then(|group| group.first())
-            {
-                return symbol.documentation.clone();
-            }
+        {
+            return symbol.documentation.clone();
         }
         builtin_index()
             .get(label)
@@ -1599,10 +1597,8 @@ impl AnalysisSnapshot {
                     && declaration.selection == file.symbols[occurrence.symbol].range
             })
         });
-        if !local_function {
-            if let Some(symbol) = self.project_symbol_at(path, byte_offset) {
-                return self.rename_project_symbol(path, symbol, new_name);
-            }
+        if !local_function && let Some(symbol) = self.project_symbol_at(path, byte_offset) {
+            return self.rename_project_symbol(path, symbol, new_name);
         }
         let Some(occurrence) = file.occurrence_at(byte_offset) else {
             if self.builtin_at(path, byte_offset).is_some() {
@@ -2356,26 +2352,26 @@ impl Visitor for SemanticCollector<'_> {
         self.pending_parameters.push(self.parameters(body));
     }
     fn visit_type_info(&mut self, info: &ast::luau::TypeInfo) {
-        if let ast::luau::TypeInfo::Basic(name) = info {
-            if let Some(range) = self.identifier_range(name.token()) {
-                let builtin = matches!(
-                    name.token().to_string().as_str(),
-                    "any"
-                        | "boolean"
-                        | "integer"
-                        | "never"
-                        | "number"
-                        | "string"
-                        | "table"
-                        | "thread"
-                        | "unknown"
-                        | "userdata"
-                        | "vector2"
-                        | "vector3"
-                        | "vector4"
-                );
-                self.tokens.push((range, 2, if builtin { 4 } else { 0 }));
-            }
+        if let ast::luau::TypeInfo::Basic(name) = info
+            && let Some(range) = self.identifier_range(name.token())
+        {
+            let builtin = matches!(
+                name.token().to_string().as_str(),
+                "any"
+                    | "boolean"
+                    | "integer"
+                    | "never"
+                    | "number"
+                    | "string"
+                    | "table"
+                    | "thread"
+                    | "unknown"
+                    | "userdata"
+                    | "vector2"
+                    | "vector3"
+                    | "vector4"
+            );
+            self.tokens.push((range, 2, if builtin { 4 } else { 0 }));
         }
     }
     fn visit_function_call(&mut self, call: &ast::FunctionCall) {
@@ -2393,10 +2389,10 @@ impl Visitor for SemanticCollector<'_> {
                     target = None;
                 }
                 ast::Suffix::Call(_) => {
-                    if let Some(name) = target.take() {
-                        if let Some(range) = self.identifier_range(name.token()) {
-                            self.tokens.push((range, 3, 0));
-                        }
+                    if let Some(name) = target.take()
+                        && let Some(range) = self.identifier_range(name.token())
+                    {
+                        self.tokens.push((range, 3, 0));
                     }
                 }
                 _ => target = None,
@@ -2640,8 +2636,8 @@ fn non_code_at(source: &str, offset: usize) -> bool {
             index = end + 1;
             continue;
         }
-        if rest.starts_with("/*") {
-            let end = rest[2..].find("*/").map(|end| index + end + 4);
+        if let Some(comment) = rest.strip_prefix("/*") {
+            let end = comment.find("*/").map(|end| index + end + 4);
             if end.is_none_or(|end| offset < end) {
                 return true;
             }
@@ -2939,10 +2935,9 @@ fn builtin_source_path(file: &str) -> PathBuf {
     if let Some(path) = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
             .map(|parent| parent.join("definitions").join(file))
-    }) {
-        if path.is_file() {
-            return path;
-        }
+    }) && path.is_file()
+    {
+        return path;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("lsp")

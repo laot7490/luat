@@ -480,33 +480,28 @@ impl AnalysisSnapshot {
                         .prepared
                         .original_offset(token.start_position().bytes());
                     if start && !text.is_empty() {
-                        if range.contains(&offset) {
-                            if let Some(help) = self.signature_help(path, offset) {
-                                if help.signatures.len() == 1 {
-                                    if let Some(parameter) =
-                                        help.signatures[0].parameters.get(argument)
-                                    {
-                                        let name = parameter
-                                            .split(':')
-                                            .next()
-                                            .unwrap_or(parameter)
-                                            .trim()
-                                            .trim_end_matches('?');
-                                        if name != "..."
-                                            && name != text
-                                            && !name.strip_prefix("arg").is_some_and(|suffix| {
-                                                !suffix.is_empty()
-                                                    && suffix.chars().all(|c| c.is_ascii_digit())
-                                            })
-                                        {
-                                            result.push(EditorInlayHint {
-                                                offset,
-                                                label: format!("{name}:"),
-                                                parameter: true,
-                                            });
-                                        }
-                                    }
-                                }
+                        if range.contains(&offset)
+                            && let Some(help) = self.signature_help(path, offset)
+                            && help.signatures.len() == 1
+                            && let Some(parameter) = help.signatures[0].parameters.get(argument)
+                        {
+                            let name = parameter
+                                .split(':')
+                                .next()
+                                .unwrap_or(parameter)
+                                .trim()
+                                .trim_end_matches('?');
+                            if name != "..."
+                                && name != text
+                                && !name.strip_prefix("arg").is_some_and(|suffix| {
+                                    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+                                })
+                            {
+                                result.push(EditorInlayHint {
+                                    offset,
+                                    label: format!("{name}:"),
+                                    parameter: true,
+                                });
                             }
                         }
                         start = false;

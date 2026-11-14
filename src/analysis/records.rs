@@ -126,23 +126,20 @@ impl AnalysisSnapshot {
                 Documentation::before(&file.source, symbol.range.start),
             );
         };
-        if let Some(root) = nearest_project_root(path) {
-            if let Some(index) = self.project_symbols.get(&root) {
-                for group in index.values() {
-                    if let Some(project_symbol) = group
+        if let Some(root) = nearest_project_root(path)
+            && let Some(index) = self.project_symbols.get(&root)
+        {
+            for group in index.values() {
+                if let Some(project_symbol) = group
+                    .iter()
+                    .find(|s| s.kind == ProjectSymbolKind::TypeAlias)
+                    && let Some(file) = self.files.get(&project_symbol.path)
+                    && let Some(symbol) = file
+                        .symbols
                         .iter()
-                        .find(|s| s.kind == ProjectSymbolKind::TypeAlias)
-                    {
-                        if let Some(file) = self.files.get(&project_symbol.path) {
-                            if let Some(symbol) = file
-                                .symbols
-                                .iter()
-                                .find(|s| s.range == project_symbol.range)
-                            {
-                                add(file, symbol);
-                            }
-                        }
-                    }
+                        .find(|s| s.range == project_symbol.range)
+                {
+                    add(file, symbol);
                 }
             }
         }
