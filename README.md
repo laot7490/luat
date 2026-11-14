@@ -1,19 +1,17 @@
 <div align="center">
-  <img src="logos/logo-brand.svg" alt="LuaT" width="100" />
+  <img src="logos/logo.png" alt="LuaT" width="100" />
 
-  <h1>LuaT</h1>
+  <h1>Luat</h1>
   <p><strong>Catch type mistakes in Lua scripts and build FiveM resources.</strong></p>
 
   <p>
-    <a href="https://www.npmjs.com/package/@luatlang/cli"><img src="https://img.shields.io/npm/v/@luatlang/cli?style=flat-square&logo=npm&logoColor=white&label=npm" alt="npm version" /></a>
+    <a href="https://www.npmjs.com/package/@luatlang/cli"><img src="https://img.shields.io/npm/v/@luatlang/cli?style=flat-square&logo=npm&logoColor=white&label=npm&color=9D82F1" alt="npm version" /></a>
     <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 22 or later" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license" /></a>
   </p>
 
-  <p><a href="#what-luat-does">Features</a> · <a href="#get-started">Get started</a> · <a href="#commands">Commands</a> · <a href="#example-syntax">Example syntax</a> · <a href="#local-imports">Local imports</a> · <a href="#project-settings">Configuration</a>
+  <p><a href="#what-luat-does">Features</a> · <a href="#get-started">Get started</a> · <a href="#commands">Commands</a> · <a href="#example-syntax">Example syntax</a> · <a href="#local-imports">Local imports</a> · <a href="#language-server">Language server</a> · <a href="#project-settings">Configuration</a>
 </div>
-
-LuaT helps you add type information to Lua code, find certain mistakes before running it, and build the scripts and manifest for a FiveM resource.
 
 ## What LuaT does
 
@@ -22,7 +20,8 @@ LuaT helps you add type information to Lua code, find certain mistakes before ru
 - Provides commands to create a project, check it, build it, and rebuild it as you edit.
 
 > [!NOTE]
-> LuaT is in early development. Its checks do not cover every Lua expression or FiveM API.
+
+- LuaT is in early development. You may encounter bugs or unexpected behavior. If you experience any issues, please [open an issue](https://github.com/laot7490/luat/issues) on GitHub.
 
 ## Get started
 
@@ -62,15 +61,13 @@ luat build --project resources/my-resource
 
 LuaT reads project settings from `luat.toml`. The settings describe the resource and its shared, client, and server scripts. See [`luat.toml.example`](luat.toml.example) for the available options.
 
-The [`example/`](example/) directory contains a sample FiveM resource that shows the project setup and build flow.
-
 ## Example syntax
 
 LuaT supports type annotations and a few concise ways to write common Lua expressions:
 
 ```lua
-type Job = 'police' | 'medic'
-type Player = { name: string, job: Job, callsign?: string }
+typedef Job = 'police' | 'medic'
+typedef Player = { name: string, job: Job, callsign?: string }
 
 const player: Player = { name = 'Ada', job = 'police' }
 
@@ -109,9 +106,8 @@ print(settings.greeting)
 ```
 
 Imported modules are included in the resource build automatically. The `@/` path starts from the project's `src/` directory.
-
 Imports are included in the built resource and work with Asset Escrow unlike the FiveM's require system.
 
-## License
+## Language server
 
-LuaT is licensed under the [MIT License](LICENSE).
+LuaT includes a language server for `.luat` and `.d.luat` files. The VS Code extension and setup instructions are in [`lsp/editors/vscode`](lsp/editors/vscode/README.md); general LSP clients can run `luat-lsp --stdio`. See the [server guide](lsp/README.md) for build and release archive details.
