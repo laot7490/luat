@@ -34,3 +34,7 @@ Use Conventional Commit subjects, such as `fix: handle nested imports` or `feat:
 ## Configuration and Generated Files
 
 Use `luat.toml.example` as the reference for project configuration. Treat `dist/` and build outputs as generated artifacts; make source changes in `src/`, package files, or fixtures instead.
+
+## Readme Edits
+
+Do not edit, modify or delete README.md files unless user requests.
