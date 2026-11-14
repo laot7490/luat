@@ -2576,29 +2576,7 @@ impl<'a> SemanticCollector<'a> {
     }
 
     fn signature(&self, body: &ast::FunctionBody, name: &str) -> SignatureInformation {
-        let parameters = body
-            .parameters()
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| match parameter {
-                ast::Parameter::Name(token) => {
-                    let name = token.token().to_string();
-                    let ty = body.type_specifiers().nth(index).flatten().map_or_else(
-                        || "any".to_owned(),
-                        |specifier| specifier.type_info().to_string().trim().to_owned(),
-                    );
-                    format!("{name}: {ty}")
-                }
-                ast::Parameter::Ellipsis(_) => {
-                    body.type_specifiers().nth(index).flatten().map_or_else(
-                        || "...".to_owned(),
-                        |specifier| format!("...: {}", specifier.type_info().to_string().trim()),
-                    )
-                }
-                _ => String::new(),
-            })
-            .filter(|parameter| !parameter.is_empty())
-            .collect::<Vec<_>>();
+        let parameters = function_parameters(body);
         let offset = body
             .start_position()
             .map(|position| self.offset(position.bytes()))
@@ -2932,7 +2910,56 @@ impl Visitor for SemanticCollector<'_> {
     }
 }
 
+fn function_parameters(body: &ast::FunctionBody) -> Vec<String> {
+    body.parameters()
+        .iter()
+        .zip(body.type_specifiers().chain(std::iter::repeat(None)))
+        .filter_map(|(parameter, specifier)| {
+            let ty = specifier.map(|specifier| specifier.type_info().to_string().trim().to_owned());
+            match parameter {
+                ast::Parameter::Name(token) => Some(format!(
+                    "{}: {}",
+                    token.token(),
+                    ty.as_deref().unwrap_or("any")
+                )),
+                ast::Parameter::Ellipsis(_) => {
+                    Some(ty.map_or_else(|| "...".to_owned(), |ty| format!("...: {ty}")))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 fn infer_literal(expression: &ast::Expression) -> String {
+    match expression {
+        ast::Expression::TableConstructor(table) => {
+            let fields = table
+                .fields()
+                .iter()
+                .filter_map(|field| {
+                    let ast::Field::NameKey { key, value, .. } = field else {
+                        return None;
+                    };
+                    Some(format!("{}: {}", key.token(), infer_literal(value)))
+                })
+                .collect::<Vec<_>>();
+            return if fields.is_empty() {
+                "table".to_owned()
+            } else {
+                format!("{{ {} }}", fields.join(", "))
+            };
+        }
+        ast::Expression::Function(function) => {
+            let body = function.body();
+            let returns = body.return_type().map_or_else(
+                || "any".to_owned(),
+                |specifier| specifier.type_info().to_string().trim().to_owned(),
+            );
+            return format!("({}) -> {returns}", function_parameters(body).join(", "));
+        }
+        _ => {}
+    }
     let value = expression.to_string();
     let value = value.trim();
     if value.starts_with(['\'', '"']) {

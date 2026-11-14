@@ -25,8 +25,17 @@ impl AnalysisSnapshot {
             .record_fields(&context, offset, &ty)
             .into_iter()
             .find(|field| field.name == name)?;
-        let mut ty = field.type_name.trim();
+        field.signature(receiver, method)
+    }
+}
+
+impl RecordField {
+    fn signature(&self, receiver: &str, method: bool) -> Option<SignatureInformation> {
+        let mut ty = self.type_name.trim();
         let (parameters, returns) = loop {
+            if !ty.starts_with('(') {
+                return None;
+            }
             let mut depth = 0usize;
             let close = ty.char_indices().find_map(|(index, character)| {
                 if character == '(' {
@@ -39,9 +48,6 @@ impl AnalysisSnapshot {
                 }
                 None
             })?;
-            if !ty.starts_with('(') {
-                return None;
-            }
             if let Some(returns) = ty[close + 1..].trim_start().strip_prefix("->") {
                 break (&ty[1..close], returns.trim());
             }
@@ -69,16 +75,18 @@ impl AnalysisSnapshot {
             label: format!(
                 "function {receiver}{}{}({}): {}",
                 if method { ':' } else { '.' },
-                name,
+                self.name,
                 parameters.join(", "),
                 returns.trim()
             ),
             parameter_documentation: vec![None; parameters.len()],
             parameters,
-            documentation: field.documentation,
+            documentation: self.documentation.clone(),
         })
     }
+}
 
+impl AnalysisSnapshot {
     fn editor_aliases(
         &self,
         path: &Path,
@@ -490,7 +498,10 @@ impl AnalysisSnapshot {
         Some(HoverResult {
             range,
             contents: hover_markdown(
-                &format!("{}: {}", field.name, field.type_name),
+                &field.signature(expression, false).map_or_else(
+                    || format!("{}: {}", field.name, field.type_name),
+                    |signature| signature.label,
+                ),
                 field.documentation.as_deref().unwrap_or_default(),
             ),
         })

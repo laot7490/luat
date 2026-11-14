@@ -8,6 +8,114 @@ fn analyze(source: &str) -> (AnalysisSnapshot, PathBuf) {
 }
 
 #[test]
+fn callback_record_hover_preserves_named_parameters_and_return_types() {
+    for declaration in ["local", "const"] {
+        let source = format!(
+            "typedef Player = {{ name: string }}\nlocal player: Player\n{declaration} callbacks = {{ render = function(value: Player): string return value.name end }}\nlocal rendered = callbacks.render(player)"
+        );
+        let (snapshot, path) = analyze(&source);
+        let offset = source.rfind("render(player)").unwrap();
+        let hover = snapshot.hover(&path, offset).unwrap();
+        assert_eq!(&source[hover.range], "render");
+        assert!(
+            hover
+                .contents
+                .contains("function callbacks.render(value: Player): string")
+        );
+        let help = snapshot
+            .signature_help(&path, source.rfind("player)").unwrap())
+            .unwrap();
+        assert_eq!(help.signatures[0].parameters, ["value: Player"]);
+        assert!(help.signatures[0].label.ends_with(": string"));
+        let completion = snapshot
+            .completions(&path, offset)
+            .into_iter()
+            .find(|item| item.label == "render")
+            .unwrap();
+        assert_eq!(completion.kind, CompletionKind::Function);
+        assert!(completion.detail.contains("value: Player"));
+    }
+}
+
+#[test]
+fn nested_callback_record_hover_keeps_plain_fields_and_empty_parameters() {
+    let source = "local callbacks = { nested = { render = function(): string return 'ok' end }, title = 'hello', count = 1 }\ncallbacks.nested.render()\nprint(callbacks.title, callbacks.count)";
+    let (snapshot, path) = analyze(source);
+    let hover = snapshot
+        .hover(&path, source.rfind("render()").unwrap())
+        .unwrap();
+    assert!(
+        hover
+            .contents
+            .contains("function callbacks.nested.render(): string")
+    );
+    for (name, ty) in [("title", "string"), ("count", "number")] {
+        let hover = snapshot.hover(&path, source.rfind(name).unwrap()).unwrap();
+        assert!(hover.contents.contains(&format!("{name}: {ty}")));
+    }
+    assert!(
+        snapshot
+            .hover(&path, source.find("'hello'").unwrap() + 1)
+            .is_none()
+    );
+}
+
+#[test]
+fn callback_record_hover_uses_updated_buffers_and_keeps_old_snapshots() {
+    let path = PathBuf::from("target/tests/callback-hover.luat");
+    let mut host = AnalysisHost::new();
+    let old_source = "local callbacks = { render = function(value: string): string return value end }\ncallbacks.render('ok')";
+    host.set_file(path.clone(), old_source.to_owned());
+    let old = host.snapshot();
+    let new_source = old_source.replace("string", "number");
+    host.set_file(path.clone(), new_source.clone());
+    let new = host.snapshot();
+    for (snapshot, source, ty) in [
+        (old, old_source, "string"),
+        (new, new_source.as_str(), "number"),
+    ] {
+        let hover = snapshot
+            .hover(&path, source.rfind("render(").unwrap())
+            .unwrap();
+        assert!(
+            hover
+                .contents
+                .contains(&format!("function callbacks.render(value: {ty}): {ty}"))
+        );
+    }
+}
+
+#[test]
+fn callback_record_hover_handles_untyped_parameters_and_varargs() {
+    let source = "local callbacks = { render = function(value, count: number, ...: string) return value end }\ncallbacks.render(1, 2, 'x')";
+    let (snapshot, path) = analyze(source);
+    let hover = snapshot
+        .hover(&path, source.rfind("render(").unwrap())
+        .unwrap();
+    assert!(
+        hover
+            .contents
+            .contains("function callbacks.render(value: any, count: number, ...: string): any")
+    );
+}
+
+#[test]
+fn callback_record_hover_rejects_missing_fields_and_incomplete_functions() {
+    for source in [
+        "local callbacks = {}\ncallbacks.render()",
+        "local callbacks = { title = 'hello' }\ncallbacks.render()",
+        "local callbacks = { render = function(value:",
+    ] {
+        let (snapshot, path) = analyze(source);
+        assert!(
+            snapshot
+                .hover(&path, source.rfind("render").unwrap())
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn markdown_comments_preserve_links_and_typeless_parameter_descriptions() {
     let source = "---[Native Documentation](https://docs.fivem.net/natives/?_0xE7490533)  \n---next line\n---@param value string description\n---@return Sonuç\nlocal function documented(value: string): string return value end\ndocumented('x')";
     let (snapshot, path) = analyze(source);
