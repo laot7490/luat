@@ -89,7 +89,7 @@ impl AnalysisHost {
         if self.files.get(&path).map(AsRef::as_ref) == Some(source.as_str()) {
             return;
         }
-        if path.file_name().is_some_and(|name| name == "luat.toml") {
+        if is_configuration(&path) {
             self.roots.clear();
         }
         Arc::make_mut(&mut self.files).insert(path.clone(), source.into());
@@ -112,7 +112,7 @@ impl AnalysisHost {
     pub fn invalidate_file(&mut self, path: &Path) {
         self.revision += 1;
         self.dirty_paths.insert(path.to_path_buf());
-        if path.file_name().is_some_and(|name| name == "luat.toml") {
+        if is_configuration(path) {
             self.roots.clear();
         }
     }
@@ -140,7 +140,10 @@ impl AnalysisHost {
             .unwrap_or_default();
         let mut changed = Vec::new();
         for (path, source) in self.files.iter() {
-            if path.to_string_lossy().ends_with(".luat") {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "luat" || extension == "lua")
+            {
                 let file = self.inputs.file(path, source);
                 if !snapshot
                     .files
@@ -190,6 +193,7 @@ impl AnalysisHost {
                             type_name: symbol.type_name.clone(),
                             signature: symbol.signature.clone(),
                             documentation: documentation_before(&file.source, symbol.range.start),
+                            context: None,
                         });
                 }
             }
@@ -228,7 +232,10 @@ impl AnalysisHost {
             if cancelled() {
                 return None;
             }
-            if path.to_string_lossy().ends_with(".luat") {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "luat" || extension == "lua")
+            {
                 files.insert(path.clone(), self.inputs.file(path, source));
             }
         }
@@ -303,7 +310,7 @@ impl AnalysisHost {
                 })
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            let config_path = root.join("luat.toml");
+            let config_path = configuration_path(&root);
             let config_text = overlays
                 .get(&config_path)
                 .cloned()
@@ -322,14 +329,17 @@ impl AnalysisHost {
                 || changed
                     .iter()
                     .any(|path| path == &config_path || self.filesystem_dirty.contains(path));
-            let current_load = if !reload {
-                Ok((*self.project_contexts[&root]).clone())
-            } else {
-                match config_text.as_deref() {
-                    Some(source) => Project::load_with_config_text(&config_path, source),
-                    None => Project::load(&root),
-                }
-            };
+            let current_load =
+                if root.join("luat.toml").is_file() && root.join("luat-package.toml").is_file() {
+                    Project::load(&root)
+                } else if !reload {
+                    Ok((*self.project_contexts[&root]).clone())
+                } else {
+                    match config_text.as_deref() {
+                        Some(source) => Project::load_with_config_text(&config_path, source),
+                        None => Project::load(&root),
+                    }
+                };
             let (loaded, config_error) = match current_load {
                 Ok(project) => {
                     self.invalid_configs.remove(&root);
@@ -364,7 +374,9 @@ impl AnalysisHost {
             match loaded {
                 Ok(project) => {
                     let declarations_changed = changed.iter().any(|path| {
-                        path == &root.join("luat.toml")
+                        path == &configuration_path(&root)
+                            || path == &root.join("luat.lock")
+                            || path == &root.join(".luat/install.lock")
                             || project.declaration_files().contains(path)
                     });
                     let mut declaration_error = None;
@@ -568,6 +580,15 @@ impl AnalysisHost {
                             if symbol.scope_depth != 0 {
                                 continue;
                             }
+                            let declaration_context = declarations
+                                .as_ref()
+                                .and_then(|declarations| {
+                                    declarations
+                                        .files
+                                        .iter()
+                                        .find(|declaration| declaration.path.as_ref() == Some(path))
+                                })
+                                .and_then(|declaration| declaration.context);
                             let documentation = declarations
                                 .as_ref()
                                 .and_then(|declarations| declarations.functions.get(&symbol.name))
@@ -592,11 +613,17 @@ impl AnalysisHost {
                                     type_name: symbol.type_name.clone(),
                                     signature: symbol.signature.clone(),
                                     documentation,
+                                    context: declaration_context,
                                 });
                         }
                     }
                     if let Some(declarations) = &declarations {
-                        for global in declarations.globals.values() {
+                        for global in declarations.globals.values().chain(
+                            declarations
+                                .scoped_globals
+                                .values()
+                                .flat_map(|globals| globals.values()),
+                        ) {
                             let Some(path) = &global.location.path else {
                                 continue;
                             };
@@ -611,6 +638,7 @@ impl AnalysisHost {
                                     type_name: global.type_name.clone(),
                                     signature: None,
                                     documentation: global.documentation.clone(),
+                                    context: global.context,
                                 });
                         }
                     }
@@ -835,6 +863,7 @@ struct ProjectSymbol {
     type_name: String,
     signature: Option<SignatureInformation>,
     documentation: String,
+    context: Option<crate::ExecutionContext>,
 }
 
 #[derive(Clone)]
@@ -862,15 +891,48 @@ impl AnalysisSnapshot {
         path: &Path,
         name: &str,
         kind: ProjectSymbolKind,
-    ) -> Option<&[ProjectSymbol]> {
+    ) -> Option<Vec<&ProjectSymbol>> {
         let root = self.project_root(path)?;
         let candidates = self.project_symbols.get(&root)?.get(name)?;
-        let count = candidates
+        let selected = candidates
             .iter()
-            .filter(|symbol| symbol.kind == kind)
-            .count();
-        (count > 0 && (kind == ProjectSymbolKind::Function || count == 1))
-            .then_some(candidates.as_slice())
+            .filter(|symbol| symbol.kind == kind && self.project_symbol_available(path, symbol))
+            .collect::<Vec<_>>();
+        let count = selected.len();
+        (count > 0 && (kind == ProjectSymbolKind::Function || count == 1)).then_some(selected)
+    }
+
+    fn project_symbol_available(&self, path: &Path, symbol: &ProjectSymbol) -> bool {
+        symbol.context.is_none_or(|context| {
+            if let Some(declaration) = self
+                .project_root(path)
+                .and_then(|root| self.project_symbols.get(&root))
+                .and_then(|index| index.get(&symbol.name))
+                .and_then(|group| {
+                    group.iter().find(|candidate| {
+                        candidate.path == path && path.to_string_lossy().ends_with(".d.luat")
+                    })
+                })
+            {
+                return declaration.context.is_none_or(|side| side == context);
+            }
+            self.contexts.get(path).is_none_or(|contexts| {
+                contexts.iter().all(|side| *side == context)
+                    || contexts.len() > 1
+                        && contexts.iter().all(|side| {
+                            self.project_root(path)
+                                .and_then(|root| self.project_symbols.get(&root))
+                                .and_then(|index| index.get(&symbol.name))
+                                .is_some_and(|group| {
+                                    group.iter().any(|candidate| {
+                                        candidate.kind == symbol.kind
+                                            && (candidate.context.is_none()
+                                                || candidate.context == Some(*side))
+                                    })
+                                })
+                        })
+            })
+        })
     }
 
     fn project_symbol_at(&self, path: &Path, byte_offset: usize) -> Option<&ProjectSymbol> {
@@ -879,10 +941,11 @@ impl AnalysisSnapshot {
         let name = &file.source[range.clone()];
         let root = self.project_root(path)?;
         let candidates = self.project_symbols.get(&root)?.get(name)?;
-        if let Some(symbol) = candidates
-            .iter()
-            .find(|symbol| symbol.path == path && symbol.range == range)
-        {
+        if let Some(symbol) = candidates.iter().find(|symbol| {
+            symbol.path == path
+                && symbol.range == range
+                && self.project_symbol_available(path, symbol)
+        }) {
             return Some(symbol);
         }
         let is_type = is_type_reference_position(&file.source, range.start);
@@ -916,7 +979,9 @@ impl AnalysisSnapshot {
                 return None;
             }
         }
-        group.iter().find(|symbol| symbol.kind == kind)
+        group
+            .into_iter()
+            .find(|symbol| symbol.kind == kind && self.project_symbol_available(path, symbol))
     }
 
     fn imported_member_at<'a>(
@@ -1103,6 +1168,12 @@ impl AnalysisSnapshot {
             if self.project_root(candidate_path).as_ref() != Some(&root) {
                 continue;
             }
+            if !group
+                .iter()
+                .any(|symbol| self.project_symbol_available(candidate_path, symbol))
+            {
+                continue;
+            }
             for token in scan_identifiers(&file.prepared.text) {
                 if token.name != name {
                     continue;
@@ -1111,9 +1182,11 @@ impl AnalysisSnapshot {
                 let end = file.prepared.original_offset(token.range.end);
                 let range = start..end;
                 let is_type = is_type_reference_position(&file.source, start);
-                let declaration = group
-                    .iter()
-                    .any(|symbol| symbol.path == *candidate_path && symbol.range == range);
+                let declaration = group.iter().any(|symbol| {
+                    symbol.path == *candidate_path
+                        && symbol.range == range
+                        && self.project_symbol_available(candidate_path, symbol)
+                });
                 if (kind == ProjectSymbolKind::TypeAlias) != is_type
                     || !is_type
                         && !declaration
@@ -1148,6 +1221,13 @@ impl AnalysisSnapshot {
         symbol: &ProjectSymbol,
         new_name: &str,
     ) -> Result<WorkspaceEdit, RenameError> {
+        if symbol
+            .path
+            .components()
+            .any(|component| component.as_os_str() == ".luat")
+        {
+            return Err(RenameError::NotRenameable);
+        }
         let root = self.project_root(path).ok_or(RenameError::NotRenameable)?;
         let group = self
             .project_group(path, &symbol.name, symbol.kind)
@@ -1198,6 +1278,26 @@ impl AnalysisSnapshot {
         }
         let mut changes = BTreeMap::<PathBuf, Vec<TextEdit>>::new();
         for reference in references {
+            if self
+                .contexts
+                .get(&reference.path)
+                .is_some_and(|contexts| contexts.len() > 1)
+                && self
+                    .project_symbols
+                    .get(&root)
+                    .and_then(|index| index.get(&symbol.name))
+                    .is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate.kind == symbol.kind
+                                && !group.iter().any(|selected| {
+                                    selected.path == candidate.path
+                                        && selected.range == candidate.range
+                                })
+                        })
+                    })
+            {
+                return Err(RenameError::NotRenameable);
+            }
             changes.entry(reference.path).or_default().push(TextEdit {
                 range: reference.range,
                 new_text: new_name.to_owned(),
@@ -1283,6 +1383,16 @@ impl AnalysisSnapshot {
                 };
                 result.insert(key, (if callable { 3 } else { 4 }, modifiers));
             }
+        }
+        let mut line_start = 0;
+        for line in file.source.split_inclusive('\n') {
+            let line_text = line.trim_end_matches(['\r', '\n']);
+            let annotation = line_text.trim();
+            if ["---@client", "---@server", "---@shared"].contains(&annotation) {
+                let start = line_start + line_text.len() - line_text.trim_start().len();
+                result.insert((start, start + annotation.len()), (6, 0));
+            }
+            line_start += line.len();
         }
         for (range, kind, modifiers) in &file.semantic_roles {
             let entry = result.entry((range.start, range.end)).or_insert((*kind, 0));
@@ -1539,7 +1649,9 @@ impl AnalysisSnapshot {
         {
             for symbols in symbols.values() {
                 for symbol in symbols {
-                    if symbol.name.starts_with(prefix) {
+                    if symbol.name.starts_with(prefix)
+                        && self.project_symbol_available(path, symbol)
+                    {
                         items
                             .entry(symbol.name.clone())
                             .or_insert_with(|| CompletionItem {
@@ -2439,12 +2551,48 @@ fn exported_table_members(file: &AnalyzedFile, export_type: &str) -> HashMap<Str
 }
 
 fn nearest_project_root(path: &Path) -> Option<PathBuf> {
-    if path.file_name().is_some_and(|name| name == "luat.toml") {
-        return path.parent().map(Path::to_path_buf);
-    }
     path.ancestors()
-        .find(|ancestor| ancestor.join("luat.toml").is_file())
+        .find(|ancestor| {
+            ancestor.join("luat.toml").is_file()
+                || ancestor.join("luat-package.toml").is_file()
+                    && !ancestor
+                        .components()
+                        .any(|part| part.as_os_str() == ".luat")
+        })
         .map(Path::to_path_buf)
+}
+
+fn is_configuration(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == "luat.toml" || name == "luat-package.toml")
+}
+
+fn configuration_path(root: &Path) -> PathBuf {
+    let project = root.join("luat.toml");
+    if project.is_file() {
+        project
+    } else {
+        root.join("luat-package.toml")
+    }
+}
+
+#[test]
+fn discovers_standalone_package_roots() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target/tests")
+        .join(format!("package-discovery-{}", std::process::id()));
+    fs::create_dir_all(root.join("modules")).unwrap();
+    fs::write(root.join("luat-package.toml"), "name='example'\n").unwrap();
+    assert_eq!(
+        nearest_project_root(&root.join("modules/api.lua")),
+        Some(root.clone())
+    );
+    assert_eq!(
+        nearest_project_root(&root.join("luat-package.toml")),
+        Some(root.clone())
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn apply_project_error(
@@ -4158,6 +4306,63 @@ mod tests {
     }
 
     #[test]
+    fn context_declarations_keep_editor_queries_and_renames_separate() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target/tests")
+            .join(format!(
+                "context-review-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("types")).unwrap();
+        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client.luat']\nserver=['src/server.luat']\nshared=['src/shared.luat']\n").unwrap();
+        fs::write(root.join("types/client.d.luat"), "---@client\nfunction ContextQuery(value: string): string end\nfunction ClientOnly() end").unwrap();
+        fs::write(
+            root.join("types/server.d.luat"),
+            "---@server\nfunction ContextQuery(value: number): number end",
+        )
+        .unwrap();
+        let client = root.join("src/client.luat");
+        let server = root.join("src/server.luat");
+        let shared = root.join("src/shared.luat");
+        let source = "ContextQuery('value')";
+        fs::write(&client, source).unwrap();
+        fs::write(&server, "ContextQuery(1)").unwrap();
+        fs::write(&shared, "").unwrap();
+        let mut host = AnalysisHost::new();
+        host.set_file(client.clone(), source.into());
+        host.set_file(shared.clone(), String::new());
+        let snapshot = host.snapshot();
+        let signatures = snapshot
+            .signature_help(&client, source.find("'value'").unwrap())
+            .unwrap();
+        assert_eq!(signatures.signatures.len(), 1);
+        let edits = snapshot.rename(&client, 1, "RenamedQuery").unwrap();
+        assert!(!edits.changes.contains_key(&server));
+        assert!(
+            !edits
+                .changes
+                .contains_key(&root.join("types/server.d.luat"))
+        );
+        assert!(
+            !snapshot
+                .completions(&shared, 0)
+                .iter()
+                .any(|item| item.label == "ClientOnly")
+        );
+        host.set_file(shared.clone(), "local callback = ContextQuery".into());
+        assert_eq!(
+            host.snapshot().rename(&client, 1, "RenamedQuery"),
+            Err(RenameError::NotRenameable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn nested_projects_keep_import_symbols_isolated() {
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4491,6 +4696,28 @@ mod editor_correction_tests {
                 .iter()
                 .filter(|(r, _, _)| &source[r.clone()] == "number")
                 .all(|(_, kind, modifiers)| *kind == 2 && modifiers & 4 != 0)
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_highlight_execution_context_annotations() {
+        let path = PathBuf::from("contexts.luat");
+        let source = "---@client\n---@server\n---@shared\n-- @client";
+        let mut host = AnalysisHost::new();
+        host.set_file(path.clone(), source.into());
+
+        let tokens = host.snapshot().semantic_tokens(&path);
+        for annotation in ["---@client", "---@server", "---@shared"] {
+            assert!(
+                tokens
+                    .iter()
+                    .any(|(range, kind, _)| { &source[range.clone()] == annotation && *kind == 6 })
+            );
+        }
+        assert!(
+            !tokens
+                .iter()
+                .any(|(range, kind, _)| { &source[range.clone()] == "-- @client" && *kind == 6 })
         );
     }
 

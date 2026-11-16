@@ -279,7 +279,7 @@ impl AnalysisSnapshot {
             }
         } else if let Some(symbol) = self
             .project_group(path, root, ProjectSymbolKind::Global)
-            .and_then(|group| group.first())
+            .and_then(|group| group.into_iter().next())
         {
             symbol.type_name.clone()
         } else {

@@ -55,6 +55,37 @@ impl Inputs {
 mod tests {
     use super::*;
 
+    #[test]
+    fn standalone_package_editor_resolves_lua_submodules() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target/tests")
+            .join(format!("package-editor-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("luat-package.toml"), "name='editor-example'\nversion='1.0.0'\nauthor='Test'\nlicense='MIT'\nshared=['init.luat','api.lua']\n").unwrap();
+        fs::write(root.join("api.lua"), "return { answer = 42 }").unwrap();
+        let main = root.join("init.luat");
+        let source = "local api = import('./api.lua')\nreturn api";
+        fs::write(&main, source).unwrap();
+        let mut host = AnalysisHost::new();
+        host.set_file(main.clone(), source.into());
+        let snapshot = host.snapshot();
+        assert!(
+            snapshot.diagnostics(&main).unwrap().is_empty(),
+            "{:?}",
+            snapshot.diagnostics(&main)
+        );
+        host.set_file(main.clone(), "local api = import('./api.lua')\napi.".into());
+        let editor = host.editor_snapshot();
+        assert!(
+            editor
+                .completions(&main, "local api = import('./api.lua')\napi.".len())
+                .iter()
+                .any(|item| item.label == "answer")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn project(name: &str) -> PathBuf {
         let id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

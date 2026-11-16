@@ -2,7 +2,9 @@ pub mod analysis;
 mod compiler;
 mod diagnostic;
 mod execution_context;
-mod output;
+#[doc(hidden)]
+pub mod output;
+pub mod packages;
 mod project;
 
 pub use compiler::compile_source;

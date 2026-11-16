@@ -393,6 +393,7 @@ struct TypeChecker<'a> {
     functions: HashMap<String, FunctionSignature>,
     declaration_functions: HashMap<String, Vec<FunctionSignature>>,
     opposite_context_functions: HashSet<String>,
+    opposite_context_globals: HashSet<String>,
     global_types: HashMap<String, String>,
     execution_context: Option<ExecutionContext>,
     scopes: Vec<HashMap<String, String>>,
@@ -546,6 +547,39 @@ impl FunctionCollector {
 }
 
 impl TypeChecker<'_> {
+    fn check_context_value(&mut self, token: &full_moon::tokenizer::TokenReference) {
+        let name = token.token().to_string();
+        if let Some(context) = self.execution_context
+            && (self.opposite_context_globals.contains(&name)
+                || self.opposite_context_functions.contains(&name))
+            && !self.functions.contains_key(&name)
+            && !self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(&name))
+        {
+            let start = token
+                .start_position()
+                .map_or(0, |position| position.bytes());
+            if self.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "LT2010"
+                    && diagnostic.source_range.start == self.prepared.original_offset(start)
+            }) {
+                return;
+            }
+            self.diagnostics.push(Diagnostic::at(
+                self.source,
+                self.prepared.original_offset(start),
+                name.chars().count().max(1),
+                "LT2010",
+                format!(
+                    "Value '{name}' is only available in the {} context.",
+                    context.opposite().as_str()
+                ),
+            ));
+        }
+    }
     fn primitive_kind(&self, type_name: &str) -> Option<&'static str> {
         let (type_name, optional) = resolve_optional_base_type(type_name, &self.aliases);
         if optional {
@@ -2101,6 +2135,18 @@ impl Visitor for TypeChecker<'_> {
                 _ => {}
             }
             receiver.push_str(&suffix.to_string());
+        }
+    }
+
+    fn visit_var(&mut self, node: &ast::Var) {
+        if let ast::Var::Name(token) = node {
+            self.check_context_value(token);
+        }
+    }
+
+    fn visit_prefix(&mut self, node: &ast::Prefix) {
+        if let ast::Prefix::Name(token) = node {
+            self.check_context_value(token);
         }
     }
 
@@ -3681,6 +3727,11 @@ pub(crate) fn check_with_imports(
         },
     );
     aliases.aliases.extend(declarations.aliases.clone());
+    if let Some(context) = execution_context
+        && let Some(scoped) = declarations.scoped_aliases.get(&context)
+    {
+        aliases.aliases.extend(scoped.clone());
+    }
     let checker_aliases = aliases.aliases.clone();
     aliases.visit_ast(ast);
 
@@ -3708,7 +3759,7 @@ pub(crate) fn check_with_imports(
         source,
         prepared,
         import_types,
-        aliases: checker_aliases,
+        aliases: checker_aliases.clone(),
         alias_scope_changes: Vec::new(),
         functions: {
             let mut functions = FunctionCollector::default();
@@ -3750,11 +3801,47 @@ pub(crate) fn check_with_imports(
                 .map(|(name, _)| name.clone())
                 .collect()
         }),
-        global_types: declarations
-            .globals
-            .iter()
-            .map(|(name, global)| (name.clone(), global.type_name.clone()))
-            .collect(),
+        opposite_context_globals: execution_context.map_or_else(HashSet::new, |context| {
+            declarations
+                .scoped_globals
+                .get(&context.opposite())
+                .into_iter()
+                .flat_map(|globals| globals.keys())
+                .filter(|name| {
+                    !declarations.globals.contains_key(*name)
+                        && !declarations
+                            .scoped_globals
+                            .get(&context)
+                            .is_some_and(|current| current.contains_key(*name))
+                })
+                .cloned()
+                .collect()
+        }),
+        global_types: {
+            let mut globals = declarations
+                .globals
+                .iter()
+                .map(|(name, global)| {
+                    (
+                        name.clone(),
+                        resolve_alias_chain(&global.type_name, &checker_aliases)
+                            .unwrap_or_else(|| global.type_name.clone()),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            if let Some(context) = execution_context
+                && let Some(scoped) = declarations.scoped_globals.get(&context)
+            {
+                globals.extend(scoped.iter().map(|(name, global)| {
+                    (
+                        name.clone(),
+                        resolve_alias_chain(&global.type_name, &checker_aliases)
+                            .unwrap_or_else(|| global.type_name.clone()),
+                    )
+                }));
+            }
+            globals
+        },
         execution_context,
         scopes: vec![HashMap::new()],
         block_scopes: Vec::new(),
@@ -3796,28 +3883,38 @@ pub(super) fn validate_declaration_types(
         },
     );
     aliases.aliases.extend(declarations.aliases.clone());
-    let alias_graph = unguarded_alias_graph(&aliases.aliases);
-    let cycles = find_alias_cycles(&alias_graph);
-    let deep_aliases = find_deep_aliases(&alias_graph);
-    for file in &declarations.files {
-        let mut validator = TypeReferenceValidator {
-            source: &file.source,
-            prepared: &file.prepared,
-            alias_scopes: vec![aliases.aliases.clone()],
-            generic_scopes: Vec::new(),
-            cycles: cycles.clone(),
-            deep_aliases: deep_aliases.clone(),
-            reported_aliases: HashSet::new(),
-            diagnostics: Vec::new(),
-        };
-        validator.visit_ast(&file.ast);
-        if !validator.diagnostics.is_empty() {
-            return Err((
-                file.path.clone(),
-                crate::CompileError {
-                    diagnostics: validator.diagnostics,
-                },
-            ));
+    for context in [ExecutionContext::Client, ExecutionContext::Server] {
+        let mut context_aliases = aliases.aliases.clone();
+        if let Some(scoped) = declarations.scoped_aliases.get(&context) {
+            context_aliases.extend(scoped.clone());
+        }
+        let alias_graph = unguarded_alias_graph(&context_aliases);
+        let cycles = find_alias_cycles(&alias_graph);
+        let deep_aliases = find_deep_aliases(&alias_graph);
+        for file in declarations
+            .files
+            .iter()
+            .filter(|file| file.context.is_none() || file.context == Some(context))
+        {
+            let mut validator = TypeReferenceValidator {
+                source: &file.source,
+                prepared: &file.prepared,
+                alias_scopes: vec![context_aliases.clone()],
+                generic_scopes: Vec::new(),
+                cycles: cycles.clone(),
+                deep_aliases: deep_aliases.clone(),
+                reported_aliases: HashSet::new(),
+                diagnostics: Vec::new(),
+            };
+            validator.visit_ast(&file.ast);
+            if !validator.diagnostics.is_empty() {
+                return Err((
+                    file.path.clone(),
+                    crate::CompileError {
+                        diagnostics: validator.diagnostics,
+                    },
+                ));
+            }
         }
     }
     Ok(())
@@ -3842,7 +3939,29 @@ pub(crate) fn infer_module_export_type_from_ast(
     ast: &ast::Ast,
     import_types: &HashMap<String, String>,
 ) -> String {
+    infer_module_export_type_context(
+        source,
+        prepared,
+        ast,
+        import_types,
+        &DeclarationSet::default(),
+        None,
+    )
+}
+
+pub(crate) fn infer_module_export_type_context(
+    source: &str,
+    prepared: &PreparedSource,
+    ast: &ast::Ast,
+    import_types: &HashMap<String, String>,
+    declarations: &DeclarationSet,
+    context: Option<ExecutionContext>,
+) -> String {
     let mut aliases = AliasCollector::default();
+    aliases.aliases.extend(declarations.aliases.clone());
+    if let Some(scoped) = context.and_then(|context| declarations.scoped_aliases.get(&context)) {
+        aliases.aliases.extend(scoped.clone());
+    }
     aliases.visit_ast(ast);
     let mut functions = FunctionCollector::default();
     functions.add_vector_constructors();
@@ -3858,6 +3977,7 @@ pub(crate) fn infer_module_export_type_from_ast(
         functions: functions.functions,
         declaration_functions: HashMap::new(),
         opposite_context_functions: HashSet::new(),
+        opposite_context_globals: HashSet::new(),
         global_types: HashMap::new(),
         execution_context: None,
         scopes: vec![HashMap::new()],
@@ -3870,6 +3990,37 @@ pub(crate) fn infer_module_export_type_from_ast(
         pending_local_bindings: Vec::new(),
         diagnostics: Vec::new(),
     };
+    checker.execution_context = context;
+    checker.declaration_functions = declarations
+        .functions
+        .iter()
+        .map(|(name, overloads)| {
+            (
+                name.clone(),
+                overloads
+                    .iter()
+                    .filter(|overload| {
+                        context.is_none()
+                            || overload.context.is_none()
+                            || overload.context == context
+                    })
+                    .map(|overload| overload.signature.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    checker.global_types = declarations
+        .globals
+        .iter()
+        .map(|(name, global)| (name.clone(), global.type_name.clone()))
+        .collect();
+    if let Some(scoped) = context.and_then(|context| declarations.scoped_globals.get(&context)) {
+        checker.global_types.extend(
+            scoped
+                .iter()
+                .map(|(name, global)| (name.clone(), global.type_name.clone())),
+        );
+    }
     checker.visit_ast(ast);
     let mut types = checker
         .module_returns
@@ -3948,4 +4099,43 @@ pub(crate) fn display_type(input: &str) -> String {
         )
     }
     render(input, 0)
+}
+
+pub(crate) fn expand_ambient_exports(declarations: &mut DeclarationSet) {
+    for context in [
+        None,
+        Some(ExecutionContext::Client),
+        Some(ExecutionContext::Server),
+    ] {
+        let mut aliases = declarations.aliases.clone();
+        if let Some(scoped) = context.and_then(|side| declarations.scoped_aliases.get(&side)) {
+            aliases.extend(scoped.clone());
+        }
+        let globals = match context {
+            None => Some(&mut declarations.globals),
+            Some(side) => declarations.scoped_globals.get_mut(&side),
+        };
+        if let Some(globals) = globals {
+            for global in globals.values_mut() {
+                global.type_name = expand_export_aliases(global.type_name.clone(), &aliases);
+            }
+        }
+        for function in declarations
+            .functions
+            .values_mut()
+            .flatten()
+            .filter(|function| function.context == context)
+        {
+            let signature = &mut function.signature;
+            for ty in signature
+                .parameters
+                .iter_mut()
+                .chain(signature.returns.fixed.iter_mut())
+                .chain(signature.returns.variadic.iter_mut())
+                .chain(signature.vararg.iter_mut())
+            {
+                *ty = expand_export_aliases(ty.clone(), &aliases);
+            }
+        }
+    }
 }

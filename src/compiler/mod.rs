@@ -219,13 +219,6 @@ pub(crate) fn check_source_with_declarations(
     check_project_source(source, declarations, false, None)
 }
 
-pub(crate) fn infer_module_export_type(
-    source: &str,
-    import_types: &std::collections::HashMap<String, String>,
-) -> String {
-    typecheck::infer_module_export_type(source, import_types)
-}
-
 #[cfg(test)]
 pub(crate) fn check_project_source(
     source: &str,
@@ -302,6 +295,65 @@ fn check_ast(
     } else {
         Err(CompileError { diagnostics })
     }
+}
+
+pub(crate) fn validate_package_return(source: &str) -> Result<(), CompileError> {
+    use full_moon::ast::{Expression, LastStmt};
+    let prepared = syntax::prepare(source);
+    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
+    if !parsed.errors().is_empty() {
+        return Err(CompileError {
+            diagnostics: parser_diagnostics(parsed.errors(), "", source, |offset| {
+                prepared.original_offset(offset)
+            }),
+        });
+    }
+    let ast = parsed.into_ast();
+    fn nil(expression: &Expression) -> bool {
+        match expression {
+            Expression::Parentheses { expression, .. } => nil(expression),
+            Expression::Symbol(token) => token.token().to_string() == "nil",
+            _ => false,
+        }
+    }
+    if let Some(LastStmt::Return(statement)) = ast.nodes().last_stmt()
+        && statement.returns().iter().next().is_some_and(|expression| !nil(expression))
+    {
+        return Ok(());
+    }
+    Err(CompileError {
+        diagnostics: vec![Diagnostic::range(
+            source,
+            0,
+            0,
+            "LT4010",
+            "Package modules must end with a top-level return value (not nil)".into(),
+        )],
+    })
+}
+
+pub(crate) fn infer_contextual_export(
+    source: &str,
+    imports: &std::collections::HashMap<String, String>,
+    declarations: &DeclarationSet,
+    context: Option<ExecutionContext>,
+) -> String {
+    let parsed = ParsedSource::new_prepared(source, syntax::prepare(source));
+    typecheck::infer_module_export_type_context(
+        source,
+        &parsed.prepared,
+        &parsed.ast,
+        imports,
+        declarations,
+        context,
+    )
+}
+
+pub(crate) fn infer_module_export_type(
+    source: &str,
+    imports: &std::collections::HashMap<String, String>,
+) -> String {
+    typecheck::infer_module_export_type(source, imports)
 }
 
 #[cfg(test)]
