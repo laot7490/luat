@@ -1,0 +1,55 @@
+name: Bug report
+description: Report unexpected behavior in LuaT.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, check whether this has already been reported.
+        Remove secrets and unrelated project data from any examples you share.
+  - type: input
+    id: luat-version
+    attributes:
+      label: LuaT version
+      description: Include the CLI or extension version, whichever is relevant.
+      placeholder: e.g. 0.1.4
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      placeholder: e.g. Windows 11, Ubuntu 24.04, macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest set of steps that reproduces the issue.
+      placeholder: |
+        1. Create or open...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Minimal example or project configuration
+      description: If relevant, share a small .luat example or configuration. Remove secrets first.
+      render: lua
+    validations:
+      required: false

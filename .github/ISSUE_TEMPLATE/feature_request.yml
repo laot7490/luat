@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement or new capability for LuaT.
+title: "feat: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For substantial changes, please discuss the idea in an issue before opening a pull request.
+  - type: textarea
+    id: need
+    attributes:
+      label: Need or context
+      description: What problem or use case would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you would like LuaT to support.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches have you considered?
+    validations:
+      required: false
