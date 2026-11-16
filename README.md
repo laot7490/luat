@@ -1,16 +1,18 @@
-<center>
+<p align="center">
   <picture>
     <img src="logos/banner.png" alt="LuaT" style="margin-bottom: 1rem;" />
   </picture>
+</p>
 
-  <p>
+<p align="center">
     <a href="https://www.npmjs.com/package/@luatlang/cli"><img src="https://img.shields.io/npm/v/@luatlang/cli?style=flat-square&logo=npm&logoColor=white&label=npm&color=9D82F1" alt="npm version" /></a>
     <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 22 or later" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license" /></a>
-  </p>
+</p>
 
-  <p><a href="#why-luat">Features</a> · <a href="#get-started">Get started</a> · <a href="#commands">Commands</a> · <a href="#community-packages">Packages</a> · <a href="#example-syntax">Example syntax</a> · <a href="#local-imports">Local imports</a> · <a href="#language-server">Language server</a> · <a href="#project-settings">Configuration</a>
-</center>
+<p align="center">
+  <a href="#why-luat">Features</a> · <a href="#get-started">Get started</a> · <a href="#commands">Commands</a> · <a href="#community-packages">Packages</a> · <a href="#example-syntax">Syntax</a> · <a href="#imports">Imports</a> · <a href="#language-server">Language server</a> · <a href="#project-settings">Configuration</a>
+</p>
 
 ## Why LuaT?
 
@@ -91,7 +93,7 @@ local message = `Welcome, {name}! You are {status}.`
 -- Output: 'Welcome, Ada! You are On duty.'
 ```
 
-## Local imports
+## Imports
 
 Use `import()` to share a local `.luat` module.
 Local imports works flawlessly with the FiveM's Asset Escrow system unlike traditional require systems.
@@ -134,7 +136,7 @@ LuaT's language server provides editor features for `.luat` and `.d.luat` files,
 
 ### Use it in Visual Studio Code
 
-Install the [LuaT Language Server extension from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=luat.luat-language-server). See the [VS Code setup guide](lsp/editors/vscode/README.md) for details.
+Install the [LuaT Language Server extension from Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=luat.luat-language-server). See the [VS Code setup guide](lsp/editors/vscode/README.md) for details.
 
 ### Use it in another editor
 
