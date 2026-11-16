@@ -69,6 +69,7 @@ pub(crate) struct DeclaredGlobal {
     #[allow(dead_code)]
     pub(crate) documentation: String,
     pub(crate) location: DeclarationLocation,
+    pub(crate) context: Option<ExecutionContext>,
 }
 
 pub(crate) struct DeclarationSource {
@@ -82,17 +83,51 @@ pub(crate) struct DeclarationFile {
     pub(crate) source: String,
     pub(crate) prepared: PreparedSource,
     pub(crate) ast: full_moon::ast::Ast,
+    pub(crate) context: Option<ExecutionContext>,
 }
 
 #[derive(Default)]
 pub(crate) struct DeclarationSet {
     pub(crate) aliases: HashMap<String, TypeAlias>,
+    pub(crate) scoped_aliases: HashMap<ExecutionContext, HashMap<String, TypeAlias>>,
     pub(crate) functions: HashMap<String, Vec<DeclaredFunction>>,
     pub(crate) globals: HashMap<String, DeclaredGlobal>,
+    pub(crate) scoped_globals: HashMap<ExecutionContext, HashMap<String, DeclaredGlobal>>,
     pub(crate) files: Vec<DeclarationFile>,
 }
 
 impl DeclarationSet {
+    pub(crate) fn extend_ambient(&mut self, mut package: Self) -> Result<(), String> {
+        super::typecheck::expand_ambient_exports(&mut package);
+        for (name, global) in &package.globals {
+            if self
+                .globals
+                .get(name)
+                .is_some_and(|old| old.type_name != global.type_name)
+            {
+                return Err(format!("conflicting package global '{name}'"));
+            }
+        }
+        self.globals.extend(package.globals);
+        for (side, globals) in package.scoped_globals {
+            let current = self.scoped_globals.entry(side).or_default();
+            for (name, global) in globals {
+                if current
+                    .get(&name)
+                    .is_some_and(|old| old.type_name != global.type_name)
+                {
+                    return Err(format!("conflicting package global '{name}'"));
+                }
+                current.insert(name, global);
+            }
+        }
+        for (name, functions) in package.functions {
+            self.functions.entry(name).or_default().extend(functions);
+        }
+        self.files.extend(package.files);
+        Ok(())
+    }
+
     pub(crate) fn from_texts(sources: &[String]) -> Result<Self, CompileError> {
         Self::from_sources_inner(
             sources.iter().map(|text| DeclarationSource {
@@ -117,6 +152,24 @@ impl DeclarationSet {
     ) -> Result<Self, (Option<PathBuf>, CompileError)> {
         let mut set = Self::default();
         for source in sources {
+            let annotation =
+                declaration_context(&source.text).map_err(|error| (source.path.clone(), error))?;
+            if annotation.is_some() && source.context.is_some() && annotation != source.context {
+                return Err((
+                    source.path,
+                    CompileError {
+                        diagnostics: vec![Diagnostic::at(
+                            &source.text,
+                            0,
+                            1,
+                            "LT2011",
+                            "Declaration context conflicts with its built-in execution context."
+                                .to_owned(),
+                        )],
+                    },
+                ));
+            }
+            let context = annotation.or(source.context);
             let (prepared, ast, globals) = parse_declaration_file(&source.text)
                 .map_err(|error| (source.path.clone(), error))?;
             let mut aliases = AliasCollector::default();
@@ -138,7 +191,12 @@ impl DeclarationSet {
                             .end_position()
                             .map(|position| prepared.original_offset(position.bytes()))
                             .unwrap_or(start);
-                        if set.globals.contains_key(&name) {
+                        if set.globals.contains_key(&name)
+                            || set.scoped_globals.iter().any(|(side, globals)| {
+                                (context.is_none() || context == Some(*side))
+                                    && globals.contains_key(&name)
+                            })
+                        {
                             return Err((
                                 source.path,
                                 CompileError {
@@ -160,7 +218,7 @@ impl DeclarationSet {
                             .or_default()
                             .push(DeclaredFunction {
                                 signature,
-                                context: source.context,
+                                context,
                                 documentation: documentation_before(&source.text, start),
                                 location: DeclarationLocation {
                                     path: source.path.clone(),
@@ -172,11 +230,73 @@ impl DeclarationSet {
             }
 
             for (name, alias) in aliases.aliases {
-                set.aliases.insert(name, alias);
+                if let Some(context) = context {
+                    let shared = set.aliases.get(&name);
+                    let scoped = set
+                        .scoped_aliases
+                        .get(&context)
+                        .and_then(|aliases| aliases.get(&name));
+                    if [shared, scoped].into_iter().flatten().any(|previous| {
+                        previous.parameters != alias.parameters
+                            || previous.definition != alias.definition
+                    }) {
+                        return Err((
+                            source.path.clone(),
+                            CompileError {
+                                diagnostics: vec![Diagnostic::at(
+                                    &source.text,
+                                    0,
+                                    name.chars().count(),
+                                    "LT2009",
+                                    format!(
+                                        "Type alias '{name}' has conflicting declarations in the same execution context."
+                                    ),
+                                )],
+                            },
+                        ));
+                    }
+                    set.scoped_aliases
+                        .entry(context)
+                        .or_default()
+                        .insert(name, alias);
+                } else {
+                    if set
+                        .scoped_aliases
+                        .values()
+                        .filter_map(|aliases| aliases.get(&name))
+                        .any(|previous| {
+                            previous.parameters != alias.parameters
+                                || previous.definition != alias.definition
+                        })
+                    {
+                        return Err((
+                            source.path.clone(),
+                            CompileError {
+                                diagnostics: vec![Diagnostic::at(
+                                    &source.text,
+                                    0,
+                                    name.chars().count(),
+                                    "LT2009",
+                                    format!(
+                                        "Shared type alias '{name}' conflicts with an environment-specific declaration."
+                                    ),
+                                )],
+                            },
+                        ));
+                    }
+                    set.aliases.insert(name, alias);
+                }
             }
             for mut global in globals {
                 global.location.path = source.path.clone();
-                if set.functions.contains_key(&global.name) {
+                global.context = context;
+                if set.functions.get(&global.name).is_some_and(|functions| {
+                    functions.iter().any(|function| {
+                        context.is_none()
+                            || function.context.is_none()
+                            || function.context == context
+                    })
+                }) {
                     return Err((
                         source.path,
                         CompileError {
@@ -193,7 +313,22 @@ impl DeclarationSet {
                         },
                     ));
                 }
-                if let Some(previous) = set.globals.get(&global.name)
+                let previous = context
+                    .and_then(|context| set.scoped_globals.get(&context))
+                    .and_then(|globals| globals.get(&global.name))
+                    .or_else(|| set.globals.get(&global.name))
+                    .or_else(|| {
+                        context
+                            .is_none()
+                            .then(|| {
+                                set.scoped_globals
+                                    .values()
+                                    .filter_map(|globals| globals.get(&global.name))
+                                    .find(|previous| previous.type_name != global.type_name)
+                            })
+                            .flatten()
+                    });
+                if let Some(previous) = previous
                     && previous.type_name != global.type_name
                 {
                     return Err((
@@ -212,7 +347,15 @@ impl DeclarationSet {
                         },
                     ));
                 }
-                set.globals.entry(global.name.clone()).or_insert(global);
+                if let Some(context) = context {
+                    set.scoped_globals
+                        .entry(context)
+                        .or_default()
+                        .entry(global.name.clone())
+                        .or_insert(global);
+                } else {
+                    set.globals.entry(global.name.clone()).or_insert(global);
+                }
             }
 
             set.files.push(DeclarationFile {
@@ -220,6 +363,7 @@ impl DeclarationSet {
                 source: source.text,
                 prepared,
                 ast,
+                context,
             });
         }
         if validate_declarations {
@@ -325,6 +469,7 @@ pub(crate) fn parse_declaration_file(
                         path: None,
                         range: name_start..name_end,
                     },
+                    context: None,
                 });
             }
             _ => {
@@ -337,6 +482,68 @@ pub(crate) fn parse_declaration_file(
         }
     }
     Ok((prepared, ast, globals))
+}
+
+fn declaration_context(source: &str) -> Result<Option<ExecutionContext>, CompileError> {
+    let version = LuaVersion::cfxlua().with_luau();
+    let tokens = match Lexer::new(source, version).collect() {
+        LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
+        LexerResult::Fatal(_) => Vec::new(),
+    };
+    let mut first_code = None;
+    let mut directives = Vec::new();
+    for token in tokens {
+        let start = token.start_position().bytes();
+        let end = token.end_position().bytes();
+        let line = source.get(start..end).unwrap_or_default();
+        let comment = matches!(
+            token.token_type(),
+            TokenType::SingleLineComment { .. }
+                | TokenType::MultiLineComment { .. }
+                | TokenType::CStyleComment { .. }
+        );
+        if matches!(token.token_type(), TokenType::SingleLineComment { .. })
+            && ["---@client", "---@server", "---@shared"]
+                .iter()
+                .any(|tag| line.trim() == *tag)
+        {
+            let context = match line.trim() {
+                "---@client" => Some(ExecutionContext::Client),
+                "---@server" => Some(ExecutionContext::Server),
+                _ => None,
+            };
+            directives.push((start, line.trim().to_owned(), context));
+        } else if !comment && !line.trim().is_empty() && first_code.is_none() {
+            first_code = Some(start);
+        }
+    }
+    if directives.len() > 1 {
+        let (offset, tag, _) = &directives[1];
+        return Err(CompileError {
+            diagnostics: vec![Diagnostic::at(
+                source,
+                *offset,
+                tag.len(),
+                "LT2011",
+                "A declaration file may have only one execution context tag.".to_owned(),
+            )],
+        });
+    }
+    let Some((offset, tag, context)) = directives.into_iter().next() else {
+        return Ok(None);
+    };
+    if first_code.is_some_and(|first| offset > first) {
+        return Err(CompileError {
+            diagnostics: vec![Diagnostic::at(
+                source,
+                offset,
+                tag.len(),
+                "LT2011",
+                "Execution context tags must appear before declarations.".to_owned(),
+            )],
+        });
+    }
+    Ok(context)
 }
 
 fn executable_declaration_error(
@@ -376,6 +583,84 @@ mod tests {
         project::{BuildError, Project},
     };
     use std::{fs, time::SystemTime};
+
+    #[test]
+    fn ambient_packages_expand_private_aliases_before_merging() {
+        let mut declarations = DeclarationSet::default();
+        for text in [
+            "typedef Private = number\ndeclare First: { value: Private }",
+            "typedef Private = string\ndeclare Second: { value: Private }",
+        ] {
+            let package = DeclarationSet::from_texts(&[text.into()]).unwrap();
+            declarations.extend_ambient(package).unwrap();
+        }
+        assert!(!declarations.aliases.contains_key("Private"));
+        assert!(declarations.globals["First"].type_name.contains("number"));
+        assert!(declarations.globals["Second"].type_name.contains("string"));
+        assert!(!declarations.globals["First"].type_name.contains("Private"));
+    }
+
+    #[test]
+    fn reads_file_level_context_tags_only_from_comments() {
+        let declarations = DeclarationSet::from_sources([DeclarationSource {
+            path: None,
+            context: None,
+            text: "---@server\ntypedef Api = number\nfunction query(): Api end".to_owned(),
+        }])
+        .unwrap();
+        assert_eq!(
+            declarations.files[0].context,
+            Some(crate::ExecutionContext::Server)
+        );
+        assert!(
+            declarations
+                .scoped_aliases
+                .contains_key(&crate::ExecutionContext::Server)
+        );
+
+        let error = DeclarationSet::from_sources([DeclarationSource {
+            path: None,
+            context: None,
+            text: "typedef Api = number\n---@client\nfunction query(): Api end".to_owned(),
+        }])
+        .err()
+        .expect("tag after declarations should fail");
+        assert_eq!(error.1.diagnostics[0].code, "LT2011");
+    }
+
+    #[test]
+    fn conflicting_context_tags_are_rejected() {
+        let error = DeclarationSet::from_sources([DeclarationSource {
+            path: None,
+            context: None,
+            text: "---@client\n---@server\nfunction query(): number end".to_owned(),
+        }])
+        .err()
+        .expect("duplicate context tags should fail");
+        assert_eq!(error.1.diagnostics[0].code, "LT2011");
+    }
+
+    #[test]
+    fn context_tags_allow_leading_whitespace_and_conflicts_ignore_file_order() {
+        assert!(
+            DeclarationSet::from_sources([DeclarationSource {
+                path: None,
+                context: None,
+                text: "\n--- Description\n\n---@client\ndeclare Value: number".into()
+            }])
+            .is_ok()
+        );
+        for texts in [
+            ["---@client\ndeclare Value: string", "declare Value: number"],
+            [
+                "---@client\ndeclare Value: string",
+                "---@client\nfunction Value() end",
+            ],
+            ["declare Value: number", "---@client\ndeclare Value: string"],
+        ] {
+            assert!(DeclarationSet::from_texts(&texts.map(str::to_owned)).is_err());
+        }
+    }
 
     fn check_project(declaration: &str, source: &str) -> Result<(), Vec<Diagnostic>> {
         let id = SystemTime::now()

@@ -1,6 +1,7 @@
 mod config;
 pub(crate) mod imports;
 mod manifest;
+mod packages;
 
 use config::FiveMConfig;
 pub use config::ProjectConfig;
@@ -73,6 +74,9 @@ pub struct Project {
     warnings: Vec<String>,
     declarations: Vec<PathBuf>,
     sources: Vec<SourceFile>,
+    package_sources: HashMap<PathBuf, packages::PackageSource>,
+    package_declaration_roots: HashMap<PathBuf, PathBuf>,
+    package_root: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -109,10 +113,30 @@ impl Project {
                 .join(requested)
         };
         let config_path = if requested.is_dir() {
-            requested.join("luat.toml")
+            if requested.join("luat.toml").is_file()
+                && requested.join("luat-package.toml").is_file()
+            {
+                return Err(BuildError::Configuration { path: requested.to_path_buf(), message: "both luat.toml and luat-package.toml exist; select a configuration file explicitly".into() });
+            }
+            if requested.join("luat.toml").is_file() {
+                requested.join("luat.toml")
+            } else if requested.join("luat-package.toml").is_file() {
+                requested.join("luat-package.toml")
+            } else {
+                requested.join("luat.toml")
+            }
         } else {
             requested
         };
+        if config_path
+            .file_name()
+            .is_none_or(|n| n != "luat.toml" && n != "luat-package.toml")
+        {
+            return Err(BuildError::Configuration {
+                path: config_path,
+                message: "use luat.toml or luat-package.toml".into(),
+            });
+        }
         let text = fs::read_to_string(&config_path).map_err(|source| BuildError::Io {
             path: config_path.clone(),
             source,
@@ -124,6 +148,12 @@ impl Project {
         config_path: &Path,
         text: &str,
     ) -> Result<Self, BuildError> {
+        if config_path
+            .file_name()
+            .is_some_and(|name| name == "luat-package.toml")
+        {
+            return Self::load_package(config_path, text);
+        }
         let config_path = config_path.to_path_buf();
         let config: ProjectConfig =
             toml::from_str(text).map_err(|error| BuildError::Configuration {
@@ -184,6 +214,12 @@ impl Project {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let installed = crate::packages::installed_packages(&root, &config.dependencies).map_err(
+            |message| BuildError::Configuration {
+                path: config_path.clone(),
+                message,
+            },
+        )?;
         let src_root = root.join("src");
         if fs::symlink_metadata(&src_root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             return Err(BuildError::Configuration {
@@ -194,6 +230,7 @@ impl Project {
         let mut sources = Vec::new();
         let mut outputs = HashSet::new();
         let mut declaration_paths = HashSet::new();
+
         for pattern in &config.compiler.declarations {
             validate_project_path(pattern, &config_path)?;
             let absolute_pattern = root.join(pattern);
@@ -362,7 +399,7 @@ impl Project {
                 message,
             }
         })?;
-        Ok(Self {
+        let mut project = Self {
             config_path,
             config,
             output_dir,
@@ -371,7 +408,12 @@ impl Project {
             warnings,
             declarations,
             sources,
-        })
+            package_sources: HashMap::new(),
+            package_declaration_roots: HashMap::new(),
+            package_root: false,
+        };
+        project.attach_packages(installed)?;
+        Ok(project)
     }
 
     pub fn warnings(&self) -> &[String] {
@@ -463,6 +505,15 @@ impl Project {
                 .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
                 .filter(|contexts| !contexts.is_empty())
                 .unwrap_or_else(|| vec![None]);
+            let owned_declarations = if self.package_sources.contains_key(&file.input) {
+                match self.read_declarations_for(Some(&file.input), &HashMap::new()) {
+                    Ok(value) => Some(value),
+                    Err(error) => return (checked, Err(error), self.resolved_imports(plan)),
+                }
+            } else {
+                None
+            };
+            let declarations = owned_declarations.as_ref().unwrap_or(declarations);
             let mut diagnostics = Vec::new();
             for context in contexts {
                 if let Err(error) = parsed.check(
@@ -548,6 +599,15 @@ impl Project {
                 .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
                 .filter(|contexts| !contexts.is_empty())
                 .unwrap_or_else(|| vec![None]);
+            let owned = if self.package_sources.contains_key(&file.input) {
+                match self.read_declarations_for(Some(&file.input), overlays) {
+                    Ok(value) => Some(value),
+                    Err(error) => return (checked_paths, Err(error), Some(imports)),
+                }
+            } else {
+                None
+            };
+            let declarations = owned.as_ref().unwrap_or(declarations);
             let mut diagnostics = Vec::new();
             for context in contexts {
                 if let Err(error) = check_project_source_with_set(
@@ -708,6 +768,15 @@ impl Project {
         &self,
         overlays: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<DeclarationSet, BuildError> {
+        self.read_declarations_for(None, overlays)
+    }
+
+    fn read_declarations_for(
+        &self,
+        path: Option<&Path>,
+        overlays: &HashMap<PathBuf, String>,
+    ) -> Result<DeclarationSet, BuildError> {
+        let owner = path.and_then(|path| self.package_sources.get(path));
         let mut sources = vec![
             DeclarationSource {
                 path: None,
@@ -743,6 +812,14 @@ impl Project {
         sources.extend(
             self.declarations
                 .iter()
+                .filter(|path| {
+                    let package_root = self.package_declaration_roots.get(*path);
+                    match (owner, package_root) {
+                        (Some(owner), Some(root)) => owner.root == *root,
+                        (None, Some(_)) => false,
+                        _ => true,
+                    }
+                })
                 .map(|path| {
                     overlays
                         .get(path)
@@ -761,10 +838,60 @@ impl Project {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
-        DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
-            path: path.unwrap_or_else(|| self.config_path.clone()),
-            error,
-        })
+        let mut declarations =
+            DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
+                path: path.unwrap_or_else(|| self.config_path.clone()),
+                error,
+            })?;
+        if owner.is_none() {
+            let roots = self
+                .package_declaration_roots
+                .values()
+                .collect::<BTreeSet<_>>();
+            for root in roots {
+                if self
+                    .package_sources
+                    .values()
+                    .any(|source| &source.root == root)
+                {
+                    continue;
+                }
+                let sources = self
+                    .package_declaration_roots
+                    .iter()
+                    .filter(|(_, owner)| *owner == root)
+                    .map(|(path, _)| {
+                        let text = overlays
+                            .get(path)
+                            .cloned()
+                            .map(Ok)
+                            .unwrap_or_else(|| fs::read_to_string(path))
+                            .map_err(|source| BuildError::Io {
+                                path: path.clone(),
+                                source,
+                            })?;
+                        Ok(DeclarationSource {
+                            path: Some(path.clone()),
+                            context: None,
+                            text,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, BuildError>>()?;
+                let package = DeclarationSet::from_sources(sources).map_err(|(path, error)| {
+                    BuildError::Compile {
+                        path: path.unwrap_or_else(|| root.join("luat-package.toml")),
+                        error,
+                    }
+                })?;
+                declarations.extend_ambient(package).map_err(|message| {
+                    BuildError::Configuration {
+                        path: root.join("luat-package.toml"),
+                        message,
+                    }
+                })?;
+            }
+        }
+        Ok(declarations)
     }
 
     fn compile(
@@ -774,6 +901,12 @@ impl Project {
         plan: &imports::ImportPlan,
     ) -> Result<String, BuildError> {
         let source = &plan.texts[&file.input];
+        let owned_declarations = self
+            .package_sources
+            .contains_key(&file.input)
+            .then(|| self.read_declarations_for(Some(&file.input), &HashMap::new()))
+            .transpose()?;
+        let declarations = owned_declarations.as_ref().unwrap_or(declarations);
         if file.output.is_none() {
             return Ok(String::new());
         }
@@ -802,7 +935,23 @@ impl Project {
         if !errors.is_empty() {
             return Err(compile_errors(errors));
         }
-        let compiled = compiled.unwrap_or_default();
+        let compiled = if file
+            .input
+            .extension()
+            .is_some_and(|extension| extension == "lua")
+            && self.package_sources.contains_key(&file.input)
+        {
+            crate::compiler::imports::rewrite(
+                source,
+                plan.resolved.get(&file.input).unwrap_or(&HashMap::new()),
+            )
+            .map_err(|error| BuildError::Compile {
+                path: file.input.clone(),
+                error,
+            })?
+        } else {
+            compiled.unwrap_or_default()
+        };
         let generated = if plan.wrapped.contains(&file.input) {
             let id = file
                 .output

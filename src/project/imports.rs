@@ -54,7 +54,7 @@ fn diagnostic(
     }
 }
 
-fn resolve(
+fn resolve_project(
     module: &Module,
     call: &ImportCall,
     modules: &BTreeMap<String, Module>,
@@ -264,7 +264,9 @@ impl Project {
         parse: Option<&SourceParser<'_>>,
         previous: Option<&ImportPlan>,
     ) -> Result<ImportPlan, BuildError> {
-        if let (Some(parse), Some(old)) = (parse, previous) {
+        if self.package_sources.is_empty()
+            && let (Some(parse), Some(old)) = (parse, previous)
+        {
             let mut plan = old.clone();
             let mut same_graph = true;
             for (path, old_calls) in &old.calls {
@@ -376,15 +378,27 @@ impl Project {
                     })?;
             }
         }
+        if self.package_root {
+            for (path, source) in &self.package_sources {
+                if source.root != self.root {
+                    continue;
+                }
+                for (side, entries) in originals.iter_mut().enumerate() {
+                    if source.sides & (1 << side) != 0 {
+                        entries.push(format!("@module:{}", self.module_id(path).unwrap()));
+                    }
+                }
+            }
+            for entries in &mut originals {
+                entries.sort();
+                entries.dedup();
+            }
+        }
         plan.originals = originals.clone();
         let mut pending = originals
             .iter()
             .flatten()
-            .filter_map(|path| {
-                path.strip_prefix("src/")
-                    .and_then(|path| path.strip_suffix(".luat"))
-                    .map(str::to_owned)
-            })
+            .filter_map(|path| entry_id(path).map(str::to_owned))
             .collect::<Vec<_>>();
         let roots = originals
             .iter()
@@ -398,13 +412,11 @@ impl Project {
                 paths
                     .iter()
                     .filter_map(|path| {
-                        path.strip_prefix("src/")
-                            .and_then(|path| path.strip_suffix(".luat"))
-                            .map(|id| {
-                                contexts
-                                    .iter()
-                                    .map(move |context| (id.to_owned(), *context))
-                            })
+                        entry_id(path).map(|id| {
+                            contexts
+                                .iter()
+                                .map(move |context| (id.to_owned(), *context))
+                        })
                     })
                     .flatten()
             })
@@ -424,6 +436,7 @@ impl Project {
                     source,
                 })?,
             };
+            self.validate_package_return(&path, &source)?;
             let calls = (if let Some(parse) = parse {
                 let parsed = parse(&path, &source)?;
                 parsed.import_calls()
@@ -445,7 +458,7 @@ impl Project {
             let mut resolved = HashMap::new();
             let mut dependencies = Vec::new();
             for call in &module.calls {
-                let target = resolve(&module, call, &modules, &self.root)?;
+                let target = self.resolve_module(&module, call, &modules)?;
                 resolved.insert(call.specifier.clone(), target.clone());
                 plan.wrapped.insert(module.path.clone());
                 plan.wrapped.insert(modules[&target].path.clone());
@@ -498,7 +511,7 @@ impl Project {
             if module
                 .path
                 .strip_prefix(self.root.join("src"))
-                .unwrap()
+                .unwrap_or(Path::new(""))
                 .components()
                 .next()
                 .is_some_and(|component| {
@@ -516,7 +529,7 @@ impl Project {
                 ));
             }
         }
-        if modules.values().all(|module| module.calls.is_empty()) {
+        if !self.package_root && modules.values().all(|module| module.calls.is_empty()) {
             return Ok(plan);
         }
         let mut complete = HashSet::new();
@@ -526,6 +539,7 @@ impl Project {
         }
 
         let mut export_types = HashMap::<String, String>::new();
+        let mut inference_declarations = HashMap::new();
         for id in dependency_order {
             let module = &modules[&id];
             plan.order.push(module.path.clone());
@@ -534,9 +548,33 @@ impl Project {
                 .iter()
                 .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
                 .collect::<HashMap<_, _>>();
-            let export_type = if let Some(parse) = parse {
-                let parsed = parse(&module.path, &module.source)?;
-                parsed.export_type(&import_types)
+            let export_type = if let Some(owner) = self.package_sources.get(&module.path) {
+                let owner_root = owner.root.clone();
+                if !inference_declarations.contains_key(&owner_root) {
+                    inference_declarations.insert(
+                        owner_root.clone(),
+                        self.read_declarations_for(Some(&module.path), overlays)?,
+                    );
+                }
+                let declarations = &inference_declarations[&owner_root];
+                let context = plan
+                    .execution_contexts
+                    .get(&module.path)
+                    .and_then(|contexts| {
+                        if contexts.len() == 1 {
+                            contexts.first().copied()
+                        } else {
+                            None
+                        }
+                    });
+                crate::compiler::infer_contextual_export(
+                    &module.source,
+                    &import_types,
+                    declarations,
+                    context,
+                )
+            } else if let Some(parse) = parse {
+                parse(&module.path, &module.source)?.export_type(&import_types)
             } else {
                 crate::compiler::infer_module_export_type(&module.source, &import_types)
             };
@@ -547,12 +585,15 @@ impl Project {
         }
 
         let mut declared = HashMap::<String, u8>::new();
+        for (path, source) in &self.package_sources {
+            declared.insert(self.module_id(path).unwrap(), source.sides);
+        }
         for (side, original_paths) in originals.iter().enumerate() {
             for path in original_paths {
-                if let Some(id) = path
-                    .strip_prefix("src/")
-                    .and_then(|path| path.strip_suffix(".luat"))
-                {
+                if self.package_root {
+                    continue;
+                }
+                if let Some(id) = entry_id(path) {
                     *declared.entry(id.to_owned()).or_default() |= 1 << side;
                 }
             }
@@ -560,10 +601,7 @@ impl Project {
         let mut closures: [BTreeSet<String>; 3] = Default::default();
         for (side, original_paths) in originals.iter().enumerate() {
             for path in original_paths {
-                let Some(id) = path
-                    .strip_prefix("src/")
-                    .and_then(|path| path.strip_suffix(".luat"))
-                else {
+                let Some(id) = entry_id(path) else {
                     continue;
                 };
                 let Some(module) = modules.get(id) else {
@@ -585,6 +623,10 @@ impl Project {
         let mut scripts: [Vec<String>; 3] = Default::default();
         scripts[0].push(output_path_for("_luat/runtime", out_dir));
         for (side, original_paths) in originals.iter().enumerate() {
+            // Package roots are analysis roots; only imports should become runtime entries.
+            if self.package_root {
+                continue;
+            }
             for id in &closures[side] {
                 if plan.wrapped.contains(&modules[id].path)
                     && (side == 0 || !closures[0].contains(id))
@@ -593,10 +635,7 @@ impl Project {
                 }
             }
             for path in original_paths {
-                if let Some(id) = path
-                    .strip_prefix("src/")
-                    .and_then(|path| path.strip_suffix(".luat"))
-                {
+                if let Some(id) = entry_id(path) {
                     if modules
                         .get(id)
                         .is_some_and(|module| plan.wrapped.contains(&module.path))
@@ -620,5 +659,111 @@ impl Project {
         }
         plan.scripts = Some(scripts);
         Ok(plan)
+    }
+}
+
+fn entry_id(path: &str) -> Option<&str> {
+    path.strip_prefix("@module:")
+        .or_else(|| path.strip_prefix("src/")?.strip_suffix(".luat"))
+}
+
+impl Project {
+    fn resolve_module(
+        &self,
+        module: &Module,
+        call: &ImportCall,
+        modules: &BTreeMap<String, Module>,
+    ) -> Result<String, BuildError> {
+        let specifier = &call.specifier;
+        let owner = self.package_sources.get(&module.path);
+        let local = specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || specifier.starts_with("@/");
+        if owner.is_none() && local {
+            return resolve_project(module, call, modules, &self.root);
+        }
+        let bad = |message: String| diagnostic(module, Some(call), "LT4002", message);
+        if specifier.contains(['\\', '\0', '\r', '\n', ':']) || specifier.ends_with('/') {
+            return Err(bad(format!("Invalid package import '{specifier}'")));
+        }
+        let (name, root, path) = if local {
+            let owner = owner.unwrap();
+            let relative = module.path.strip_prefix(&owner.root).unwrap();
+            let path = if let Some(rest) = specifier.strip_prefix("@/") {
+                PathBuf::from(rest)
+            } else {
+                relative.parent().unwrap().join(specifier)
+            };
+            (owner.manifest.name.clone(), owner.root.clone(), path)
+        } else {
+            let (name, rest) = specifier.split_once('/').unwrap_or((specifier, "init"));
+            let dependencies = owner
+                .map(|owner| &owner.manifest.dependencies)
+                .unwrap_or(&self.config.dependencies);
+            if !dependencies.contains_key(name) {
+                return Err(bad(format!("Package '{name}' is not a direct dependency")));
+            }
+            let Some(target) = self
+                .package_sources
+                .values()
+                .find(|source| source.manifest.name == name)
+            else {
+                return Err(bad(format!("Package '{name}' has no runtime modules")));
+            };
+            (name.to_owned(), target.root.clone(), PathBuf::from(rest))
+        };
+        let _ = root;
+        let mut parts = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    parts.push(part.to_string_lossy().into_owned())
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if parts.pop().is_none() {
+                        return Err(bad("Import escapes package root".into()));
+                    }
+                }
+                _ => return Err(bad("Invalid package import path".into())),
+            }
+        }
+        let relative = parts.join("/");
+        if relative.ends_with(".d.luat") || relative.is_empty() {
+            return Err(bad("Import must target a runtime module".into()));
+        }
+        let prefix = format!("_luat/packages/{name}/");
+        let candidates = if relative.ends_with(".lua") || relative.ends_with(".luat") {
+            vec![relative.clone()]
+        } else if Path::new(&relative).extension().is_some() {
+            return Err(bad("Unsupported module extension".into()));
+        } else {
+            vec![
+                format!("{relative}.luat"),
+                format!("{relative}.lua"),
+                format!("{relative}/init.luat"),
+                format!("{relative}/init.lua"),
+            ]
+        };
+        let found = candidates
+            .into_iter()
+            .map(|path| format!("{prefix}{path}"))
+            .filter(|id| modules.contains_key(id))
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [id] => Ok(id.clone()),
+            [] => Err(diagnostic(
+                module,
+                Some(call),
+                "LT4003",
+                format!("Package module '{specifier}' was not found"),
+            )),
+            _ => Err(diagnostic(
+                module,
+                Some(call),
+                "LT4004",
+                format!("Package import '{specifier}' is ambiguous"),
+            )),
+        }
     }
 }

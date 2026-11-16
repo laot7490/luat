@@ -137,7 +137,8 @@ fn check_accepts_runtime_sources() {
     fs::create_dir_all(root.join("src/client")).unwrap();
     fs::write(root.join("src/client/main.luat"), "print('ready')").unwrap();
     fs::write(root.join("luat.toml"), "[project]\nname='test'\n").unwrap();
-    assert!(Project::load(&root).unwrap().check().is_ok());
+    let result = Project::load(&root).unwrap().check();
+    assert!(result.is_ok(), "{result:?}");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -154,6 +155,61 @@ fn client_context_rejects_server_only_natives() {
 
     let error = Project::load(&root).unwrap().check().unwrap_err();
     assert_eq!(main_diagnostic(&error).1.code, "LT2010");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn declaration_context_tags_scope_aliases_and_globals() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("types")).unwrap();
+    fs::write(
+        root.join("types/client.d.luat"),
+        "---@client\ntypedef PlatformValueType = string\ndeclare PlatformValue: PlatformValueType",
+    )
+    .unwrap();
+    fs::write(
+        root.join("types/server.d.luat"),
+        "---@server\ntypedef PlatformValueType = number\ndeclare PlatformValue: PlatformValueType",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local value: string = PlatformValue",
+    )
+    .unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n").unwrap();
+
+    let result = Project::load(&root).unwrap().check();
+    assert!(result.is_ok(), "{result:?}");
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local value = PlatformServerValue",
+    )
+    .unwrap();
+    fs::write(
+        root.join("types/server.d.luat"),
+        "---@server\ndeclare PlatformServerValue: number",
+    )
+    .unwrap();
+    let error = Project::load(&root).unwrap().check().unwrap_err();
+    assert_eq!(main_diagnostic(&error).1.code, "LT2010");
+    fs::write(root.join("types/server.d.luat"), "---@server\ndeclare ServerApi: { value: number, call: () -> () }\nfunction ServerCallback() end").unwrap();
+    for source in [
+        "local value = ServerApi.value",
+        "ServerApi.call()",
+        "local callback = ServerCallback",
+    ] {
+        fs::write(root.join("src/client/main.luat"), source).unwrap();
+        let error = Project::load(&root).unwrap().check().unwrap_err();
+        assert_eq!(main_diagnostic(&error).1.code, "LT2010");
+    }
+    fs::write(
+        root.join("src/client/main.luat"),
+        "local function ServerCallback() end\nlocal callback = ServerCallback\ncallback()",
+    )
+    .unwrap();
+    assert!(Project::load(&root).unwrap().check().is_ok());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -537,4 +593,87 @@ fn manifest_remaps_sources_and_serializes_extra_values() {
     assert!(manifest.contains("dependencies { 'some.luat' }"));
     assert!(manifest.contains("custom_info 'one' { ['count'] = 42, ['enabled'] = true }"));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_modules_require_chunk_return_and_remain_lazy() {
+    let root = temp_project();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("luat-package.toml"),
+        "name='module-test'\nversion='1.0.0'\nauthor='test'\nlicense='MIT'\nshared=['init.luat']\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("init.luat"),
+        "local function nested() return 1 end",
+    )
+    .unwrap();
+    assert!(
+        Project::load(root.join("luat-package.toml"))
+            .and_then(|p| p.check())
+            .is_err()
+    );
+    fs::write(root.join("init.luat"), "return false").unwrap();
+    Project::load(root.join("luat-package.toml"))
+        .unwrap()
+        .check()
+        .unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_check_resolves_relative_lua_modules_and_contexts() {
+    let root = temp_project();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("luat-package.toml"), "name='module-test'\nversion='1.0.0'\nauthor='test'\nlicense='MIT'\nshared=['init.luat','value.lua']\nserver=['secret.luat']\n").unwrap();
+    fs::write(
+        root.join("init.luat"),
+        "const value: string = import('./value.lua')\nreturn value",
+    )
+    .unwrap();
+    fs::write(root.join("value.lua"), "return 42").unwrap();
+    fs::write(root.join("secret.luat"), "return 'secret'").unwrap();
+    let error = Project::load(root.join("luat-package.toml"))
+        .unwrap()
+        .check()
+        .unwrap_err();
+    assert!(error.to_string().contains("number"), "{error}");
+    fs::write(root.join("value.lua"), "return 'ok'").unwrap();
+    Project::load(root.join("luat-package.toml"))
+        .unwrap()
+        .check()
+        .unwrap();
+    fs::write(root.join("init.luat"), "return import('./secret.luat')").unwrap();
+    let error = Project::load(root.join("luat-package.toml"))
+        .unwrap()
+        .check()
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot import"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_return_validation_uses_chunk_ast() {
+    for source in [
+        "return {}",
+        "return false",
+        "local x = 1\nreturn x",
+        "-- return nil\nreturn 3",
+    ] {
+        crate::compiler::validate_package_return(source).unwrap();
+    }
+    for source in [
+        "",
+        "return",
+        "return nil",
+        "return ((nil))",
+        "local function f() return 1 end",
+        "local x = 'return 1'",
+    ] {
+        assert!(
+            crate::compiler::validate_package_return(source).is_err(),
+            "{source}"
+        );
+    }
 }

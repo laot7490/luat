@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -9,6 +9,8 @@ pub struct ProjectConfig {
     pub compiler: CompilerConfig,
     #[serde(default)]
     pub fivem: FiveMConfig,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
