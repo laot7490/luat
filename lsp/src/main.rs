@@ -308,7 +308,7 @@ impl LanguageServer for Backend {
                 )),
                 semantic_tokens_provider: Some(tower_lsp_server::ls_types::SemanticTokensServerCapabilities::SemanticTokensOptions(tower_lsp_server::ls_types::SemanticTokensOptions {
                     legend: tower_lsp_server::ls_types::SemanticTokensLegend {
-                        token_types: ["variable", "parameter", "type", "function", "property", "operator"].into_iter().map(tower_lsp_server::ls_types::SemanticTokenType::new).collect(),
+                        token_types: ["variable", "parameter", "type", "function", "property", "operator", "keyword"].into_iter().map(tower_lsp_server::ls_types::SemanticTokenType::new).collect(),
                         token_modifiers: ["readonly", "declaration", "defaultLibrary", "deprecated"].into_iter().map(tower_lsp_server::ls_types::SemanticTokenModifier::new).collect(),
                     },
                     full: Some(tower_lsp_server::ls_types::SemanticTokensFullOptions::Bool(true)),

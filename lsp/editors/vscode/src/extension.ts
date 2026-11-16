@@ -13,15 +13,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		args: ["--stdio"],
 		transport: TransportKind.stdio,
 	};
-	const watcher = vscode.workspace.createFileSystemWatcher("**/{*.luat,luat.toml}");
+	const watcher = vscode.workspace.createFileSystemWatcher("**/{*.luat,*.lua,luat.toml,luat-package.toml,luat.lock}");
+	const managedTypesWatcher = vscode.workspace.createFileSystemWatcher("**/.luat/**");
 	const clientOptions: LanguageClientOptions = {
-		documentSelector: [{ scheme: "file", language: "luat" }],
-		synchronize: { fileEvents: watcher, configurationSection: "luat" },
+		documentSelector: [{ scheme: "file", language: "luat" }, { scheme: "file", language: "lua" }],
+		synchronize: { fileEvents: [watcher, managedTypesWatcher], configurationSection: "luat" },
         initializationOptions: vscode.workspace.getConfiguration("luat"),
 		outputChannel: output,
 	};
 	client = new LanguageClient("luat", "LuaT Language Server", serverOptions, clientOptions);
-	context.subscriptions.push(output, watcher, client);
+	context.subscriptions.push(output, watcher, managedTypesWatcher, client);
 	context.subscriptions.push(
 		vscode.commands.registerCommand("luat.restartLanguageServer", async () => {
 			await client?.restart();
