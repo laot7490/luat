@@ -105,6 +105,9 @@ fn create(
     version: &str,
     license: &str,
 ) -> Result<(), (u8, String)> {
+    if !super::catalog::valid_name(name) {
+        return Err(err("invalid package name"));
+    }
     let root = base.join(name);
     if fs::symlink_metadata(&root).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(err("target directory must not be a symlink"));
