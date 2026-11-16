@@ -482,7 +482,11 @@ fn resolve_and_install(
     if fs::read(config).ok().as_deref() != Some(original.as_slice())
         || fs::read(root.join("luat.lock")).ok() != lock_before_resolution
     {
-        return Err((2, "error LT5301: Project files changed during package resolution; retry the operation".into()));
+        return Err((
+            2,
+            "error LT5301: Project files changed during package resolution; retry the operation"
+                .into(),
+        ));
     }
     if !install_only {
         for name in unversioned {
@@ -1346,14 +1350,10 @@ mod tests {
         let original = fs::read(&config).unwrap();
         let (registry, server) = serve(vec![("404 Not Found".into(), String::new())]);
 
-        assert!(install_packages(
-            &root,
-            &config,
-            &["example".into()],
-            false,
-            &registry,
-            false,
-        ).is_err());
+        assert!(
+            install_packages(&root, &config, &["example".into()], false, &registry, false,)
+                .is_err()
+        );
         server.join().unwrap();
 
         assert!(!root.join(".luat").exists());

@@ -317,7 +317,11 @@ pub(crate) fn validate_package_return(source: &str) -> Result<(), CompileError> 
         }
     }
     if let Some(LastStmt::Return(statement)) = ast.nodes().last_stmt()
-        && statement.returns().iter().next().is_some_and(|expression| !nil(expression))
+        && statement
+            .returns()
+            .iter()
+            .next()
+            .is_some_and(|expression| !nil(expression))
     {
         return Ok(());
     }

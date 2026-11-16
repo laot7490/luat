@@ -47,24 +47,64 @@ pub fn check_package(root: &Path) -> Result<(), crate::BuildError> {
 }
 fn ask(label: &str, default: Option<&str>) -> Result<String, (u8, String)> {
     let mut stdout = io::stdout().lock();
-    write!(stdout, "{label}{}: ", default.map_or(String::new(), |v| format!(" ({v})"))).map_err(err)?;
+    write!(
+        stdout,
+        "{label}{}: ",
+        default.map_or(String::new(), |v| format!(" ({v})"))
+    )
+    .map_err(err)?;
     stdout.flush().map_err(err)?;
     let mut value = String::new();
     if io::stdin().read_line(&mut value).map_err(err)? == 0 {
         return Err(err("input ended before package setup was complete"));
     }
     let value = value.trim();
-    Ok(if value.is_empty() { default.unwrap_or("").to_owned() } else { value.to_owned() })
+    Ok(if value.is_empty() {
+        default.unwrap_or("").to_owned()
+    } else {
+        value.to_owned()
+    })
 }
 fn init(base: &Path) -> Result<(), (u8, String)> {
-    let name = loop { let value = ask("Package name", None)?; if super::catalog::valid_name(&value) { break value; } eprintln!("Use lowercase letters, numbers, _ or - in package name."); };
-    let author = loop { let value = ask("Author", None)?; if !value.is_empty() { break value; } eprintln!("Author cannot be empty."); };
+    let name = loop {
+        let value = ask("Package name", None)?;
+        if super::catalog::valid_name(&value) {
+            break value;
+        }
+        eprintln!("Use lowercase letters, numbers, _ or - in package name.");
+    };
+    let author = loop {
+        let value = ask("Author", None)?;
+        if !value.is_empty() {
+            break value;
+        }
+        eprintln!("Author cannot be empty.");
+    };
     let description = ask("Description", None)?;
-    let version = loop { let value = ask("Version", Some("1.0.0"))?; if semver::Version::parse(&value).is_ok() { break value; } eprintln!("Enter a valid semantic version."); };
-    let license = loop { let value = ask("License", Some("MIT"))?; if !value.is_empty() { break value; } eprintln!("License cannot be empty."); };
+    let version = loop {
+        let value = ask("Version", Some("1.0.0"))?;
+        if semver::Version::parse(&value).is_ok() {
+            break value;
+        }
+        eprintln!("Enter a valid semantic version.");
+    };
+    let license = loop {
+        let value = ask("License", Some("MIT"))?;
+        if !value.is_empty() {
+            break value;
+        }
+        eprintln!("License cannot be empty.");
+    };
     create(base, &name, &author, &description, &version, &license)
 }
-fn create(base: &Path, name: &str, author: &str, description: &str, version: &str, license: &str) -> Result<(), (u8, String)> {
+fn create(
+    base: &Path,
+    name: &str,
+    author: &str,
+    description: &str,
+    version: &str,
+    license: &str,
+) -> Result<(), (u8, String)> {
     let root = base.join(name);
     if fs::symlink_metadata(&root).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(err("target directory must not be a symlink"));
@@ -73,7 +113,9 @@ fn create(base: &Path, name: &str, author: &str, description: &str, version: &st
         return Err(err("target directory must be empty"));
     }
     fs::create_dir_all(&root).map_err(err)?;
-    let manifest = format!("name = {name:?}\nversion = {version:?}\nauthor = {author:?}\ndescription = {description:?}\nlicense = {license:?}\n\nshared = [\"init.luat\"]\nclient = []\nserver = []\ndeclarations = []\n\n[dependencies]\n");
+    let manifest = format!(
+        "name = {name:?}\nversion = {version:?}\nauthor = {author:?}\ndescription = {description:?}\nlicense = {license:?}\n\nshared = [\"init.luat\"]\nclient = []\nserver = []\ndeclarations = []\n\n[dependencies]\n"
+    );
     fs::write(root.join("luat-package.toml"), manifest).map_err(err)?;
     fs::write(root.join("init.luat"), "return {}\n").map_err(err)?;
     println!(
