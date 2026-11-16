@@ -1,14 +1,15 @@
 use std::process::ExitCode;
 
 mod cli;
-mod output;
 
 fn main() -> ExitCode {
-    match cli::run(std::env::args().skip(1).collect()) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let pretty = !args.windows(2).any(|pair| pair == ["--pretty", "false"]);
+    luat::output::with_pretty(pretty, || match cli::run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
-            eprintln!("\n{message}");
+            eprintln!("{}", luat::output::stderr_message(&message));
             ExitCode::from(code)
         }
-    }
+    })
 }

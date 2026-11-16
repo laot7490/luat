@@ -27,9 +27,15 @@ pub(super) fn paint(text: &str, color: Color, enabled: bool) -> String {
 
 pub(super) fn render_build_error(error: &BuildError, pretty: bool) -> String {
     match error {
-        BuildError::Io { path, source } => format!("error: {}: {source}", path.display()),
+        BuildError::Io { path, source } => format!(
+            "error LT5301: Could not access {}: {source}",
+            path.display()
+        ),
         BuildError::Configuration { path, message } => {
-            format!("error: {}: {message}", path.display())
+            format!(
+                "error LT5101: Invalid configuration in {}: {message}",
+                path.display()
+            )
         }
         BuildError::Compile { path, error } => {
             render_errors(&[(path.clone(), error.clone())], pretty).to_string()
@@ -129,28 +135,28 @@ fn render_diagnostic(
     let underline = "~".repeat(highlight_width);
     let number_width = line_number.to_string().len().max(4);
     let header = format!(
-        "{}:{}:{} - {} {}: {}",
-        paint(&path.display().to_string(), Color::Cyan, color),
-        paint(&line_number.to_string(), Color::Yellow, color),
-        paint(&column.to_string(), Color::Yellow, color),
+        "{} {}: {}\n  {} {}:{}:{}",
         paint("error", Color::Error, color),
         paint(diagnostic.code, Color::Muted, color),
-        diagnostic.message
+        diagnostic.message,
+        paint("-->", Color::Cyan, color),
+        paint(&path.display().to_string(), Color::Cyan, color),
+        line_number,
+        column
     );
-    let code_line = format!("{line_number:>number_width$} {expanded}");
+    let gutter = paint("|", Color::Muted, color);
+    let code_line = format!("{line_number:>number_width$} {gutter} {expanded}");
     let marker = format!(
-        "{}{}{}",
-        " ".repeat(number_width + 1),
+        "{} {gutter} {}{}",
+        " ".repeat(number_width),
         " ".repeat(start_column),
-        underline
+        paint(&underline, Color::Error, color)
     );
-    if color {
-        format!("{header}\n\n{code_line}\n\x1b[31m{marker}\x1b[0m")
-    } else {
-        format!("{header}\n\n{code_line}\n{marker}")
-    }
+    format!(
+        "{header}\n{} {gutter}\n{code_line}\n{marker}",
+        " ".repeat(number_width)
+    )
 }
-
 fn render_file_diagnostic(path: &std::path::Path, diagnostic: &Diagnostic, color: bool) -> String {
     format!(
         "{} - {} {}: {}",
@@ -252,9 +258,9 @@ mod tests {
         let rendered = render_diagnostic(Path::new("main.luat"), source, &diagnostic, false);
 
         assert!(rendered.contains("main.luat:2:13"), "{rendered}");
-        assert!(rendered.contains("   2 local bad = {}"), "{rendered}");
+        assert!(rendered.contains("   2 | local bad = {}"), "{rendered}");
         assert!(
-            rendered.contains(&format!("{}~", " ".repeat(17))),
+            rendered.contains(&format!("{}~", "    |             ")),
             "{rendered}"
         );
     }
@@ -305,7 +311,7 @@ mod tests {
 
         assert!(rendered.contains("main.luat:1:19"), "{rendered}");
         assert!(
-            rendered.contains("   1     local value = 'Ça'"),
+            rendered.contains("   1 |     local value = 'Ça'"),
             "{rendered}"
         );
         assert!(!rendered.contains('\r'), "{rendered}");
@@ -328,7 +334,7 @@ mod tests {
         let rendered = render_diagnostic(Path::new("main.luat"), source, &diagnostic, false);
 
         assert!(rendered.contains("main.luat:2:1"), "{rendered}");
-        assert!(rendered.contains("   2 \n     ~"), "{rendered}");
+        assert!(rendered.contains("   2 | \n     | ~"), "{rendered}");
     }
 
     #[test]

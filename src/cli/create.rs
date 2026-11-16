@@ -14,27 +14,32 @@ pub(crate) fn create_project(root: &Path) -> Result<(), String> {
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!(
-                    "error: refusing to follow symlink {}",
+                    "error LT5301: Refusing to follow symlink {}",
                     path.display()
                 ));
             }
             Ok(metadata) if files.iter().any(|file| root.join(file) == path) => {
                 let _ = metadata;
-                return Err(format!("error: {} already exists", path.display()));
+                return Err(format!("error LT5301: {} already exists", path.display()));
             }
             Ok(metadata) if !metadata.is_dir() => {
-                return Err(format!("error: {} is not a directory", path.display()));
+                return Err(format!(
+                    "error LT5301: {} is not a directory",
+                    path.display()
+                ));
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("error: {}: {error}", path.display())),
+            Err(error) => return Err(format!("error LT5301: {}: {error}", path.display())),
         }
     }
 
-    fs::create_dir_all(root).map_err(|error| format!("error: {}: {error}", root.display()))?;
+    fs::create_dir_all(root)
+        .map_err(|error| format!("error LT5301: {}: {error}", root.display()))?;
     for directory in directories {
         let path = root.join(directory);
-        fs::create_dir_all(&path).map_err(|error| format!("error: {}: {error}", path.display()))?;
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("error LT5301: {}: {error}", path.display()))?;
     }
 
     let name = root
@@ -58,22 +63,36 @@ pub(crate) fn create_project(root: &Path) -> Result<(), String> {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|error| format!("error: {}: {error}", path.display()))?;
+            .map_err(|error| format!("error LT5301: {}: {error}", path.display()))?;
         io::Write::write_all(&mut file, content)
-            .map_err(|error| format!("error: {}: {error}", path.display()))?;
+            .map_err(|error| format!("error LT5301: {}: {error}", path.display()))?;
     }
     Ok(())
 }
 
 pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--pretty" && args.get(index + 1).is_some_and(|value| value == "false") {
+            index += 2;
+        } else {
+            positional.push(args[index].clone());
+            index += 1;
+        }
+    }
+    let args = positional.as_slice();
     if args.len() > 1 || args.first().is_some_and(|arg| arg.starts_with('-')) {
-        return Err((2, "error: usage: luat create [directory]".to_owned()));
+        return Err((
+            2,
+            "error LT5001: Invalid arguments.\n  help: Usage: luat create [directory] [--pretty false]".to_owned(),
+        ));
     }
     let root = args.first().map_or_else(|| ".", String::as_str);
     let root = std::path::PathBuf::from(root);
     create_project(&root).map_err(|error| (2, error))?;
     println!(
-        "\nCreated LuaT project in {}\nRun `luat check` to check your scripts or `luat build` to build the resource.",
+        "\nSuccess: Created LuaT project in {}\nNext: Run `luat check` to check your scripts or `luat build` to build the resource.",
         root.display()
     );
     Ok(())

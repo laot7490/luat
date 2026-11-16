@@ -19,7 +19,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
             .map_err(|error| {
                 (
                     2,
-                    format!("error: could not resolve current directory: {error}"),
+                    format!("error LT5401: Could not resolve current directory: {error}"),
                 )
             })?
             .join(folder)
@@ -28,7 +28,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
         return Err((
             2,
             format!(
-                "error: project folder is not a directory: {}",
+                "error LT5401: Project folder is not a directory: {}",
                 folder.display()
             ),
         ));
@@ -39,7 +39,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
         return Err((
             2,
             format!(
-                "error: project configuration not found: {}",
+                "error LT5401: Project configuration not found: {}",
                 config.display()
             ),
         ));
@@ -47,22 +47,25 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     if !src.is_dir() {
         return Err((
             2,
-            format!("error: source directory not found: {}", src.display()),
+            format!(
+                "error LT5401: Source directory not found: {}",
+                src.display()
+            ),
         ));
     }
 
     let (sender, receiver) = mpsc::channel();
-    let project = Project::load(&folder)
-        .map_err(|error| (2, super::render::render_build_error(&error, pretty)))?;
-    let declarations = project.declaration_files().to_vec();
+    let mut declarations = Project::load(&folder)
+        .map(|project| project.declaration_files().to_vec())
+        .unwrap_or_default();
     let mut watcher = notify::recommended_watcher(sender)
-        .map_err(|error| (2, format!("error: could not start watcher: {error}")))?;
+        .map_err(|error| (2, format!("error LT5401: Could not start watcher: {error}")))?;
     watcher
         .watch(&src, RecursiveMode::Recursive)
         .map_err(|error| {
             (
                 2,
-                format!("error: could not watch {}: {error}", src.display()),
+                format!("error LT5401: Could not watch {}: {error}", src.display()),
             )
         })?;
     watcher
@@ -70,26 +73,63 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
         .map_err(|error| {
             (
                 2,
-                format!("error: could not watch {}: {error}", config.display()),
+                format!(
+                    "error LT5401: Could not watch {}: {error}",
+                    config.display()
+                ),
             )
         })?;
-    for directory in declarations
-        .iter()
-        .filter_map(|path| path.parent())
-        .filter(|directory| !directory.starts_with(&src))
-        .collect::<std::collections::HashSet<_>>()
-    {
+    let managed = folder.join(".luat");
+    let mut managed_watched = managed.exists();
+    if managed_watched {
         watcher
-            .watch(directory, RecursiveMode::NonRecursive)
+            .watch(&managed, RecursiveMode::Recursive)
             .map_err(|error| {
                 (
                     2,
-                    format!("error: could not watch {}: {error}", directory.display()),
+                    format!(
+                        "error LT5401: Could not watch {}: {error}",
+                        managed.display()
+                    ),
                 )
             })?;
     }
+    watcher
+        .watch(&folder, RecursiveMode::NonRecursive)
+        .map_err(|error| {
+            (
+                2,
+                format!(
+                    "error LT5401: Could not watch {}: {error}",
+                    folder.display()
+                ),
+            )
+        })?;
+    let mut watched_declaration_directories = std::collections::HashSet::new();
+    for directory in declarations
+        .iter()
+        .filter_map(|path| path.parent())
+        .filter(|directory| {
+            *directory != folder && !directory.starts_with(&src) && !directory.starts_with(&managed)
+        })
+        .map(Path::to_path_buf)
+        .collect::<std::collections::HashSet<_>>()
+    {
+        watcher
+            .watch(&directory, RecursiveMode::NonRecursive)
+            .map_err(|error| {
+                (
+                    2,
+                    format!(
+                        "error LT5401: Could not watch {}: {error}",
+                        directory.display()
+                    ),
+                )
+            })?;
+        watched_declaration_directories.insert(directory);
+    }
     println!(
-        "\nWatching {} for source and configuration changes",
+        "\nSuccess: Watching {} for source and configuration changes",
         folder.display()
     );
     build(&folder, pretty);
@@ -97,34 +137,108 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     loop {
         match receiver.recv() {
             Ok(Ok(event)) if relevant(&event, &src, &config, &declarations) => {
+                if managed_watched
+                    && event.paths.iter().any(|path| path == &managed)
+                    && matches!(event.kind, EventKind::Remove(_))
+                {
+                    let _ = watcher.unwatch(&managed);
+                    managed_watched = false;
+                }
+                if !managed_watched && managed.is_dir() {
+                    watcher
+                        .watch(&managed, RecursiveMode::Recursive)
+                        .map_err(|error| {
+                            (
+                                2,
+                                format!(
+                                    "error LT5401: Could not watch {}: {error}",
+                                    managed.display()
+                                ),
+                            )
+                        })?;
+                    managed_watched = true;
+                }
                 let mut changed = true;
                 while changed {
                     changed = false;
                     match receiver.recv_timeout(DEBOUNCE) {
                         Ok(Ok(next)) if relevant(&next, &src, &config, &declarations) => {
+                            if managed_watched
+                                && next.paths.iter().any(|path| path == &managed)
+                                && matches!(next.kind, EventKind::Remove(_))
+                            {
+                                let _ = watcher.unwatch(&managed);
+                                managed_watched = false;
+                            }
                             changed = true
                         }
                         Ok(Ok(_)) => {}
                         Ok(Err(error)) => {
-                            return Err((2, format!("error: filesystem watcher: {error}")));
+                            return Err((2, format!("error LT5401: Filesystem watcher: {error}")));
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            return Err((2, "error: filesystem watcher stopped".to_owned()));
+                            return Err((2, "error LT5401: Filesystem watcher stopped".to_owned()));
                         }
                     }
+                }
+                if !managed_watched && managed.is_dir() {
+                    watcher
+                        .watch(&managed, RecursiveMode::Recursive)
+                        .map_err(|error| {
+                            (
+                                2,
+                                format!(
+                                    "error LT5401: Could not watch {}: {error}",
+                                    managed.display()
+                                ),
+                            )
+                        })?;
+                    managed_watched = true;
                 }
                 if !src.is_dir() {
                     return Err((
                         2,
-                        format!("error: source directory was removed: {}", src.display()),
+                        format!(
+                            "error LT5401: Source directory was removed: {}",
+                            src.display()
+                        ),
                     ));
                 }
                 build(&folder, pretty);
+                if let Ok(project) = Project::load(&folder) {
+                    declarations = project.declaration_files().to_vec();
+                    for directory in declarations
+                        .iter()
+                        .filter_map(|path| path.parent())
+                        .filter(|directory| {
+                            *directory != folder
+                                && !directory.starts_with(&src)
+                                && !directory.starts_with(&managed)
+                        })
+                        .map(Path::to_path_buf)
+                    {
+                        if watched_declaration_directories.insert(directory.clone()) {
+                            watcher
+                                .watch(&directory, RecursiveMode::NonRecursive)
+                                .map_err(|error| {
+                                    (
+                                        2,
+                                        format!(
+                                            "error LT5401: Could not watch {}: {error}",
+                                            directory.display()
+                                        ),
+                                    )
+                                })?;
+                        }
+                    }
+                }
             }
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err((2, format!("error: filesystem watcher: {error}"))),
-            Err(_) => return Err((2, "error: filesystem watcher stopped".to_owned())),
+            Ok(Err(error)) => {
+                return Err((2, format!("error LT5401: Filesystem watcher: {error}")));
+            }
+            Err(_) => return Err((2, "error LT5401: Filesystem watcher stopped".to_owned())),
         }
     }
 }
@@ -134,7 +248,7 @@ fn build(folder: &Path, pretty: bool) {
         .map_err(|error| (2, super::render::render_build_error(&error, pretty)))
         .and_then(|project| super::run_project("build", project, pretty));
     if let Err((_, message)) = result {
-        eprintln!("\n{message}");
+        eprintln!("\n{}", luat::output::stderr_message(&message));
     }
 }
 
@@ -148,15 +262,20 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, bool), (u8, String)> {
                 pretty = false;
                 index += 2;
             }
-            "--pretty" => return Err((2, "error: '--pretty' supports only 'false'".to_owned())),
+            "--pretty" => {
+                return Err((
+                    2,
+                    "error LT5001: '--pretty' supports only 'false'".to_owned(),
+                ));
+            }
             value if value.starts_with('-') => {
-                return Err((2, format!("error: unknown option '{value}'")));
+                return Err((2, format!("error LT5001: Unknown option '{value}'")));
             }
             value if folder.is_none() => {
                 folder = Some(PathBuf::from(value));
                 index += 1;
             }
-            value => return Err((2, format!("error: unexpected argument '{value}'"))),
+            value => return Err((2, format!("error LT5001: Unexpected argument '{value}'"))),
         }
     }
     Ok((folder.unwrap_or_else(|| PathBuf::from(".")), pretty))
@@ -171,11 +290,28 @@ fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) 
     );
     event.paths.iter().any(|path| {
         path == config
+            || path
+                == &config
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("luat.lock")
+            || path
+                == config
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(".luat/install.lock")
+                    .as_path()
+            || path.starts_with(
+                config
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(".luat"),
+            )
             || declarations.iter().any(|declaration| path == declaration)
             || path.starts_with(src)
                 && (path
                     .extension()
-                    .is_some_and(|extension| extension == "luat")
+                    .is_some_and(|extension| extension == "luat" || extension == "lua")
                     || structural && path.extension().is_none())
     })
 }
@@ -229,6 +365,10 @@ mod tests {
         event.paths.push(src.join("nested/main.luat"));
         let config = Path::new("project/luat.toml");
         assert!(relevant(&event, src, config, &[]));
+        event.paths = vec![PathBuf::from("project/luat.lock")];
+        assert!(relevant(&event, src, config, &[]));
+        event.paths = vec![src.join("module.lua")];
+        assert!(relevant(&event, src, config, &[]));
         event.paths = vec![src.join("nested/readme.txt")];
         assert!(!relevant(&event, src, config, &[]));
         event.kind = EventKind::Create(notify::event::CreateKind::Folder);
@@ -241,5 +381,9 @@ mod tests {
         let declaration = PathBuf::from("project/types/api.d.luat");
         event.paths = vec![declaration.clone()];
         assert!(relevant(&event, src, config, &[declaration]));
+        event.paths = vec![PathBuf::from(
+            "project/.luat/packages/@types/example/1.0.0/client.d.luat",
+        )];
+        assert!(relevant(&event, src, config, &[]));
     }
 }
