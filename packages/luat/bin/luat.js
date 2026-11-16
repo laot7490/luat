@@ -11,11 +11,18 @@ const packages = {
   'darwin-arm64': 'luat-darwin-arm64',
 };
 
+function reportError(message) {
+  const args = process.argv.slice(2);
+  const plain = args.some((arg, index) => arg === '--pretty' && args[index + 1] === 'false');
+  const color = process.stderr.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && !plain;
+  console.error(message.replace('error:', color ? '\x1b[31merror:\x1b[0m' : 'error:'));
+}
+
 function launch() {
   const key = `${process.platform}-${process.arch}`;
   const binaryPackage = packages[key];
   if (!binaryPackage) {
-    console.error(`\nerror: LuaT has no binary for ${key}.`);
+    reportError(`\nerror: LuaT has no binary for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -24,7 +31,7 @@ function launch() {
   try {
     binary = require.resolve(binaryPackage);
   } catch {
-    console.error(`\nerror: LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
+    reportError(`\nerror: LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -40,7 +47,7 @@ function launch() {
   child.once('error', (error) => {
     spawnFailed = true;
     process.exitCode = 2;
-    console.error(`\nerror: Could not start the LuaT compiler: ${error.message}`);
+    reportError(`\nerror: Could not start the LuaT compiler: ${error.message}`);
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => child.kill(signal));

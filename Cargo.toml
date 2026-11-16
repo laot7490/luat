@@ -1,6 +1,6 @@
 [package]
 name = "luat"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "A typed Lua compiler targeting CfxLua."
 license = "MIT"
@@ -25,3 +25,7 @@ glob = "0.3"
 stylua_lib = { package = "stylua", version = "2.6", default-features = false, features = ["cfxlua", "luau"] }
 unicode-width = "0.2"
 notify = "8.2"
+ureq = "3"
+semver = "1"
+sha2 = "0.11"
+toml_edit = "0.25"
