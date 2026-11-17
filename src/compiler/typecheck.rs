@@ -3920,6 +3920,7 @@ pub(super) fn validate_declaration_types(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn infer_module_export_type(
     source: &str,
     import_types: &HashMap<String, String>,
@@ -3933,6 +3934,7 @@ pub(crate) fn infer_module_export_type(
     infer_module_export_type_from_ast(source, &prepared, &ast, import_types)
 }
 
+#[cfg(test)]
 pub(crate) fn infer_module_export_type_from_ast(
     source: &str,
     prepared: &PreparedSource,
@@ -4051,6 +4053,9 @@ pub(crate) fn editor_resolve_alias(
 pub(crate) fn editor_type_parts(ty: &str, separator: char) -> Vec<&str> {
     split_top_level(ty, separator)
 }
+pub(crate) fn editor_unwrap_type(ty: &str) -> &str {
+    strip_wrapping_parentheses(ty.trim())
+}
 pub(crate) fn editor_type_fields(ty: &str) -> Vec<&str> {
     split_top_level_by(ty, &[',', ';'])
 }
@@ -4099,43 +4104,4 @@ pub(crate) fn display_type(input: &str) -> String {
         )
     }
     render(input, 0)
-}
-
-pub(crate) fn expand_ambient_exports(declarations: &mut DeclarationSet) {
-    for context in [
-        None,
-        Some(ExecutionContext::Client),
-        Some(ExecutionContext::Server),
-    ] {
-        let mut aliases = declarations.aliases.clone();
-        if let Some(scoped) = context.and_then(|side| declarations.scoped_aliases.get(&side)) {
-            aliases.extend(scoped.clone());
-        }
-        let globals = match context {
-            None => Some(&mut declarations.globals),
-            Some(side) => declarations.scoped_globals.get_mut(&side),
-        };
-        if let Some(globals) = globals {
-            for global in globals.values_mut() {
-                global.type_name = expand_export_aliases(global.type_name.clone(), &aliases);
-            }
-        }
-        for function in declarations
-            .functions
-            .values_mut()
-            .flatten()
-            .filter(|function| function.context == context)
-        {
-            let signature = &mut function.signature;
-            for ty in signature
-                .parameters
-                .iter_mut()
-                .chain(signature.returns.fixed.iter_mut())
-                .chain(signature.returns.variadic.iter_mut())
-                .chain(signature.vararg.iter_mut())
-            {
-                *ty = expand_export_aliases(ty.clone(), &aliases);
-            }
-        }
-    }
 }

@@ -677,3 +677,63 @@ fn package_return_validation_uses_chunk_ast() {
         );
     }
 }
+
+#[test]
+fn imported_exports_use_declarations_and_each_execution_context() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::create_dir_all(root.join("src/client")).unwrap();
+    fs::create_dir_all(root.join("src/server")).unwrap();
+    fs::create_dir_all(root.join("types")).unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\nserver=['src/server/main.luat']\n").unwrap();
+    fs::write(root.join("types/client.d.luat"), "---@client\ntypedef Platform = string\ndeclare PlatformValue: Platform\ndeclare OtherValue: number").unwrap();
+    fs::write(root.join("types/server.d.luat"), "---@server\ntypedef Platform = number\ndeclare PlatformValue: Platform\ndeclare OtherValue: string").unwrap();
+    fs::write(root.join("src/shared/value.luat"), "return PlatformValue").unwrap();
+    fs::write(
+        root.join("src/shared/api.luat"),
+        "return function(value: Platform): Platform return value end",
+    )
+    .unwrap();
+    let client = "local value: string = import('@/shared/value')\nlocal api = import('@/shared/api')\nlocal result: string = api('hello')";
+    let server = "local value: number = import('@/shared/value')\nlocal api = import('@/shared/api')\nlocal result: number = api(42)";
+    fs::write(root.join("src/client/main.luat"), client).unwrap();
+    fs::write(root.join("src/server/main.luat"), server).unwrap();
+    let project = Project::load(&root).unwrap();
+    project.check().unwrap();
+    project.build().unwrap();
+    for (side, source) in [("client", server), ("server", client)] {
+        let path = root.join(format!("src/{side}/main.luat"));
+        let error = project
+            .check_with_overlays(&std::collections::HashMap::from([(
+                path,
+                source.to_owned(),
+            )]))
+            .unwrap_err();
+        assert!(error.to_string().contains("not assignable"), "{error}");
+    }
+    let old = project.analyze_imports().unwrap();
+    let path = root.join("src/shared/value.luat");
+    let overlays =
+        std::collections::HashMap::from([(path.clone(), "return OtherValue".to_owned())]);
+    let next = project.analyze_imports_with_overlays(&overlays).unwrap();
+    assert_eq!(old.exports[&path], next.exports[&path]);
+    let declarations = project.read_declarations().unwrap();
+    let parse = |_: &std::path::Path, source: &str| {
+        Ok(std::sync::Arc::new(
+            crate::compiler::ParsedSource::new_prepared(
+                source,
+                crate::compiler::syntax::prepare(source),
+            ),
+        ))
+    };
+    let (checked, result, _) = project.check_editor_with_plan(
+        &next,
+        Some(&old),
+        &std::collections::BTreeSet::from([path]),
+        &declarations,
+        &parse,
+    );
+    assert!(result.is_err());
+    assert!(checked.contains(&root.join("src/client/main.luat")));
+    assert!(checked.contains(&root.join("src/server/main.luat")));
+}

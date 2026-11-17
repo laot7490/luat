@@ -15,6 +15,8 @@ pub(crate) struct ImportPlan {
     pub texts: HashMap<PathBuf, String>,
     pub resolved: HashMap<PathBuf, HashMap<String, String>>,
     pub import_types: HashMap<PathBuf, HashMap<String, String>>,
+    pub contextual_import_types:
+        HashMap<(PathBuf, Option<ExecutionContext>), HashMap<String, String>>,
     pub wrapped: HashSet<PathBuf>,
     pub scripts: Option<[Vec<String>; 3]>,
     pub entries: Vec<(PathBuf, String)>,
@@ -264,70 +266,6 @@ impl Project {
         parse: Option<&SourceParser<'_>>,
         previous: Option<&ImportPlan>,
     ) -> Result<ImportPlan, BuildError> {
-        if self.package_sources.is_empty()
-            && let (Some(parse), Some(old)) = (parse, previous)
-        {
-            let mut plan = old.clone();
-            let mut same_graph = true;
-            for (path, old_calls) in &old.calls {
-                let Some(source) = overlays.get(path) else {
-                    same_graph = false;
-                    break;
-                };
-                if old.texts.get(path) == Some(source) {
-                    continue;
-                }
-                let calls =
-                    parse(path, source)?
-                        .import_calls()
-                        .map_err(|error| BuildError::Compile {
-                            path: path.clone(),
-                            error,
-                        })?;
-                if !calls
-                    .iter()
-                    .map(|call| &call.specifier)
-                    .eq(old_calls.iter().map(|call| &call.specifier))
-                {
-                    same_graph = false;
-                    break;
-                }
-                plan.calls.insert(path.clone(), calls);
-            }
-            if same_graph {
-                for (path, source) in &mut plan.texts {
-                    if let Some(current) = overlays.get(path) {
-                        *source = current.clone();
-                    }
-                }
-                let targets = self.resolved_imports(old);
-                for path in &old.order {
-                    let imports = targets
-                        .get(path)
-                        .into_iter()
-                        .flatten()
-                        .map(|(specifier, target)| {
-                            (
-                                specifier.clone(),
-                                plan.exports
-                                    .get(&target.target_path)
-                                    .cloned()
-                                    .unwrap_or_else(|| "any".into()),
-                            )
-                        })
-                        .collect::<HashMap<_, _>>();
-                    if old.texts.get(path) != plan.texts.get(path)
-                        || old.import_types.get(path) != Some(&imports)
-                    {
-                        let parsed = parse(path, &plan.texts[path])?;
-                        plan.exports
-                            .insert(path.clone(), parsed.export_type(&imports));
-                    }
-                    plan.import_types.insert(path.clone(), imports);
-                }
-                return Ok(plan);
-            }
-        }
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
         let mut paths = HashMap::new();
@@ -538,50 +476,84 @@ impl Project {
             visit_cycle(id, &modules, &mut complete, &mut dependency_order)?;
         }
 
-        let mut export_types = HashMap::<String, String>::new();
+        let mut export_types = HashMap::<(String, Option<ExecutionContext>), String>::new();
         let mut inference_declarations = HashMap::new();
         for id in dependency_order {
             let module = &modules[&id];
             plan.order.push(module.path.clone());
-            let import_types = module
-                .edges
-                .iter()
-                .map(|(call, target)| (call.specifier.clone(), export_types[target].clone()))
-                .collect::<HashMap<_, _>>();
-            let export_type = if let Some(owner) = self.package_sources.get(&module.path) {
-                let owner_root = owner.root.clone();
-                if !inference_declarations.contains_key(&owner_root) {
-                    inference_declarations.insert(
-                        owner_root.clone(),
-                        self.read_declarations_for(Some(&module.path), overlays)?,
-                    );
-                }
-                let declarations = &inference_declarations[&owner_root];
-                let context = plan
-                    .execution_contexts
-                    .get(&module.path)
-                    .and_then(|contexts| {
-                        if contexts.len() == 1 {
-                            contexts.first().copied()
-                        } else {
-                            None
-                        }
-                    });
-                crate::compiler::infer_contextual_export(
-                    &module.source,
-                    &import_types,
-                    declarations,
-                    context,
-                )
-            } else if let Some(parse) = parse {
-                parse(&module.path, &module.source)?.export_type(&import_types)
+            let owner_root = self
+                .package_sources
+                .get(&module.path)
+                .map(|owner| owner.root.clone())
+                .unwrap_or_else(|| self.root.clone());
+            if !inference_declarations.contains_key(&owner_root) {
+                inference_declarations.insert(
+                    owner_root.clone(),
+                    self.read_declarations_for(Some(&module.path), overlays)?,
+                );
+            }
+            let declarations = &inference_declarations[&owner_root];
+            let contexts = plan
+                .execution_contexts
+                .get(&module.path)
+                .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
+                .filter(|contexts| !contexts.is_empty())
+                .unwrap_or_else(|| vec![None]);
+            let parsed = if let Some(parse) = parse {
+                parse(&module.path, &module.source)?
             } else {
-                crate::compiler::infer_module_export_type(&module.source, &import_types)
+                std::sync::Arc::new(crate::compiler::ParsedSource::new_prepared(
+                    &module.source,
+                    crate::compiler::syntax::prepare(&module.source),
+                ))
             };
-            plan.import_types.insert(module.path.clone(), import_types);
-            plan.exports
-                .insert(module.path.clone(), export_type.clone());
-            export_types.insert(id.clone(), export_type);
+            let mut exports = Vec::new();
+            let mut imports = HashMap::<String, Vec<String>>::new();
+            for context in contexts {
+                let import_types = module
+                    .edges
+                    .iter()
+                    .map(|(call, target)| {
+                        (
+                            call.specifier.clone(),
+                            export_types[&(target.clone(), context)].clone(),
+                        )
+                    })
+                    .collect::<HashMap<String, String>>();
+                let export_type =
+                    parsed.contextual_export_type(&import_types, declarations, context);
+                for (specifier, ty) in &import_types {
+                    imports
+                        .entry(specifier.clone())
+                        .or_default()
+                        .push(ty.clone());
+                }
+                plan.contextual_import_types
+                    .insert((module.path.clone(), context), import_types);
+                exports.push(export_type.clone());
+                export_types.insert((id.clone(), context), export_type);
+            }
+            let union = |mut types: Vec<String>| {
+                types.sort();
+                types.dedup();
+                if types.len() == 1 {
+                    types.pop().unwrap()
+                } else {
+                    types
+                        .into_iter()
+                        .map(|ty| format!("({ty})"))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                }
+            };
+            plan.import_types.insert(
+                module.path.clone(),
+                imports
+                    .into_iter()
+                    .map(|(specifier, types)| (specifier, union(types)))
+                    .collect(),
+            );
+            plan.exports.insert(module.path.clone(), union(exports));
         }
 
         let mut declared = HashMap::<String, u8>::new();

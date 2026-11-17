@@ -97,37 +97,6 @@ pub(crate) struct DeclarationSet {
 }
 
 impl DeclarationSet {
-    pub(crate) fn extend_ambient(&mut self, mut package: Self) -> Result<(), String> {
-        super::typecheck::expand_ambient_exports(&mut package);
-        for (name, global) in &package.globals {
-            if self
-                .globals
-                .get(name)
-                .is_some_and(|old| old.type_name != global.type_name)
-            {
-                return Err(format!("conflicting package global '{name}'"));
-            }
-        }
-        self.globals.extend(package.globals);
-        for (side, globals) in package.scoped_globals {
-            let current = self.scoped_globals.entry(side).or_default();
-            for (name, global) in globals {
-                if current
-                    .get(&name)
-                    .is_some_and(|old| old.type_name != global.type_name)
-                {
-                    return Err(format!("conflicting package global '{name}'"));
-                }
-                current.insert(name, global);
-            }
-        }
-        for (name, functions) in package.functions {
-            self.functions.entry(name).or_default().extend(functions);
-        }
-        self.files.extend(package.files);
-        Ok(())
-    }
-
     pub(crate) fn from_texts(sources: &[String]) -> Result<Self, CompileError> {
         Self::from_sources_inner(
             sources.iter().map(|text| DeclarationSource {
@@ -260,6 +229,25 @@ impl DeclarationSet {
                         .or_default()
                         .insert(name, alias);
                 } else {
+                    if set.aliases.get(&name).is_some_and(|previous| {
+                        previous.parameters != alias.parameters
+                            || previous.definition != alias.definition
+                    }) {
+                        return Err((
+                            source.path.clone(),
+                            CompileError {
+                                diagnostics: vec![Diagnostic::at(
+                                    &source.text,
+                                    0,
+                                    name.chars().count(),
+                                    "LT2009",
+                                    format!(
+                                        "Type alias '{name}' has conflicting declarations in the same execution context."
+                                    ),
+                                )],
+                            },
+                        ));
+                    }
                     if set
                         .scoped_aliases
                         .values()
@@ -585,22 +573,6 @@ mod tests {
     use std::{fs, time::SystemTime};
 
     #[test]
-    fn ambient_packages_expand_private_aliases_before_merging() {
-        let mut declarations = DeclarationSet::default();
-        for text in [
-            "typedef Private = number\ndeclare First: { value: Private }",
-            "typedef Private = string\ndeclare Second: { value: Private }",
-        ] {
-            let package = DeclarationSet::from_texts(&[text.into()]).unwrap();
-            declarations.extend_ambient(package).unwrap();
-        }
-        assert!(!declarations.aliases.contains_key("Private"));
-        assert!(declarations.globals["First"].type_name.contains("number"));
-        assert!(declarations.globals["Second"].type_name.contains("string"));
-        assert!(!declarations.globals["First"].type_name.contains("Private"));
-    }
-
-    #[test]
     fn reads_file_level_context_tags_only_from_comments() {
         let declarations = DeclarationSet::from_sources([DeclarationSource {
             path: None,
@@ -713,8 +685,8 @@ mod tests {
     #[test]
     fn accepts_declared_globals() {
         let result = check_project(
-            "typedef StateBag = string\ndeclare GlobalState: StateBag",
-            "local state: StateBag = GlobalState",
+            "typedef CustomStateBag = string\ndeclare CustomGlobalState: CustomStateBag",
+            "local state: CustomStateBag = CustomGlobalState",
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -755,10 +727,11 @@ mod tests {
 
     #[test]
     fn local_values_shadow_declared_globals() {
-        let declaration = "typedef StateBag = string\ndeclare GlobalState: StateBag";
+        let declaration =
+            "typedef CustomStateBag = string\ndeclare CustomGlobalState: CustomStateBag";
         let result = check_project(
             declaration,
-            "local GlobalState: number = 1\nlocal value: number = GlobalState",
+            "local CustomGlobalState: number = 1\nlocal value: number = CustomGlobalState",
         );
         assert!(result.is_ok(), "{result:?}");
     }

@@ -275,13 +275,14 @@ fn lua_value(value: &toml::Value) -> Result<String, String> {
 }
 
 pub(super) fn render_manifest(config: &ProjectConfig, root: &Path) -> Result<String, String> {
-    render_manifest_with_scripts(config, root, None)
+    render_manifest_with_scripts(config, root, None, &[])
 }
 
 pub(super) fn render_manifest_with_scripts(
     config: &ProjectConfig,
     root: &Path,
     scripts: Option<&[Vec<String>; 3]>,
+    package_ignores: &[String],
 ) -> Result<String, String> {
     let f = &config.fivem;
     let mut lines = vec![
@@ -341,7 +342,34 @@ pub(super) fn render_manifest_with_scripts(
         }
     }
     for (key, values) in [("files", &f.files), ("escrow_ignore", &f.escrow_ignore)] {
-        let values = resolved_manifest_paths(values, root, &config.compiler.out_dir, false)?;
+        let mut values = if key == "escrow_ignore" {
+            let mut resolved = Vec::new();
+            for value in values {
+                let matches = resolved_manifest_paths(
+                    std::slice::from_ref(value),
+                    root,
+                    &config.compiler.out_dir,
+                    false,
+                )?;
+                if matches.is_empty() {
+                    resolved.push(manifest_path(value, &config.compiler.out_dir));
+                } else {
+                    resolved.extend(matches);
+                }
+            }
+            resolved
+        } else {
+            resolved_manifest_paths(values, root, &config.compiler.out_dir, false)?
+        };
+        if key == "escrow_ignore" {
+            let mut seen = HashSet::new();
+            values.retain(|path| seen.insert(path.clone()));
+            for path in package_ignores {
+                if !values.contains(path) {
+                    values.push(path.clone());
+                }
+            }
+        }
         if !values.is_empty() {
             lines.push(format!(
                 "{key} {{ {} }}",
@@ -472,4 +500,43 @@ pub(super) fn expanded_paths(
         }
     }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod package_escrow_tests {
+    use super::*;
+
+    #[test]
+    fn generated_package_ignores_do_not_require_existing_outputs() {
+        let config: ProjectConfig = toml::from_str(
+            "[project]\nname='escrow-test'\n[compiler]\nout_dir='custom-output'\n[fivem]\nescrow_ignore=['README.md']\n",
+        ).unwrap();
+        let path = "custom-output/_luat/packages/example/init.luat.lua".to_owned();
+        let manifest = render_manifest_with_scripts(
+            &config,
+            &std::env::current_dir().unwrap(),
+            None,
+            &[path.clone(), path.clone()],
+        )
+        .unwrap();
+        assert!(manifest.contains("'README.md'"));
+        assert_eq!(manifest.matches(&path).count(), 1);
+        assert!(!manifest.contains("custom-output/client/main.lua"));
+    }
+
+    #[test]
+    fn escrow_source_globs_expand_to_compiled_outputs() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target/tests/escrow-glob");
+        fs::create_dir_all(root.join("src/client")).unwrap();
+        fs::write(root.join("src/client/main.luat"), "print('ok')").unwrap();
+        let config: ProjectConfig = toml::from_str(
+            "[project]\nname='escrow-test'\n[compiler]\nout_dir='dist'\n[fivem]\nescrow_ignore=['src/**/*']\n",
+        ).unwrap();
+        let manifest = render_manifest_with_scripts(&config, &root, None, &[]).unwrap();
+        assert!(manifest.contains("'dist/client/main.lua'"), "{manifest}");
+        assert!(!manifest.contains("'src/**/*'"), "{manifest}");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

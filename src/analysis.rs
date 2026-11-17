@@ -112,6 +112,12 @@ impl AnalysisHost {
     pub fn invalidate_file(&mut self, path: &Path) {
         self.revision += 1;
         self.dirty_paths.insert(path.to_path_buf());
+        if path.file_name().is_some_and(|name| name == "luat.lock")
+            || path.components().any(|part| part.as_os_str() == ".luat")
+            || is_configuration(path)
+        {
+            self.filesystem_dirty.insert(path.to_path_buf());
+        }
         if is_configuration(path) {
             self.roots.clear();
         }
@@ -292,6 +298,7 @@ impl AnalysisHost {
             .map(|snapshot| (*snapshot.contexts).clone())
             .unwrap_or_default();
         let mut project_symbols = HashMap::new();
+        let mut symbol_visibility = HashMap::new();
         let mut project_imports = HashMap::new();
         let mut all_resolved_imports = HashMap::new();
         let mut project_files = HashSet::new();
@@ -329,6 +336,9 @@ impl AnalysisHost {
                 || changed
                     .iter()
                     .any(|path| path == &config_path || self.filesystem_dirty.contains(path));
+            if reload {
+                changed.insert(config_path.clone());
+            }
             let current_load =
                 if root.join("luat.toml").is_file() && root.join("luat-package.toml").is_file() {
                     Project::load(&root)
@@ -373,12 +383,21 @@ impl AnalysisHost {
             }
             match loaded {
                 Ok(project) => {
-                    let declarations_changed = changed.iter().any(|path| {
-                        path == &configuration_path(&root)
-                            || path == &root.join("luat.lock")
-                            || path == &root.join(".luat/install.lock")
-                            || project.declaration_files().contains(path)
-                    });
+                    for path in project
+                        .source_paths()
+                        .chain(project.declaration_files().iter().map(PathBuf::as_path))
+                    {
+                        if let Some(visible) = project.editor_visible_paths(path) {
+                            symbol_visibility.insert(path.to_path_buf(), visible);
+                        }
+                    }
+                    let declarations_changed = reload
+                        || changed.iter().any(|path| {
+                            path == &configuration_path(&root)
+                                || path == &root.join("luat.lock")
+                                || path == &root.join(".luat/install.lock")
+                                || project.declaration_files().contains(path)
+                        });
                     let mut declaration_error = None;
                     let declarations =
                         if declarations_changed || !self.project_declarations.contains_key(&root) {
@@ -406,7 +425,7 @@ impl AnalysisHost {
                         }
                         let source = previous
                             .and_then(|s| s.files.get(path))
-                            .filter(|_| !self.dirty_paths.contains(path))
+                            .filter(|_| !reload && !self.dirty_paths.contains(path))
                             .map(|file| file.source.clone())
                             .or_else(|| fs::read_to_string(path).ok());
                         let Some(source) = source else {
@@ -738,6 +757,7 @@ impl AnalysisHost {
             contexts: Arc::new(contexts),
             files: Arc::new(files),
             project_symbols: Arc::new(project_symbols),
+            symbol_visibility: Arc::new(symbol_visibility),
             project_imports: Arc::new(project_imports),
             roots: Arc::new(self.roots.clone()),
             semantic_cache: Default::default(),
@@ -841,6 +861,7 @@ pub struct AnalysisSnapshot {
     contexts: Arc<HashMap<PathBuf, Vec<crate::ExecutionContext>>>,
     files: Arc<BTreeMap<PathBuf, Arc<AnalyzedFile>>>,
     project_symbols: Arc<HashMap<PathBuf, HashMap<String, Vec<ProjectSymbol>>>>,
+    symbol_visibility: Arc<HashMap<PathBuf, HashSet<PathBuf>>>,
     project_imports: Arc<HashMap<PathBuf, Vec<ImportBinding>>>,
     roots: Arc<HashMap<PathBuf, Option<PathBuf>>>,
     semantic_cache: Arc<std::sync::Mutex<HashMap<PathBuf, Vec<SemanticTokenRange>>>>,
@@ -903,6 +924,13 @@ impl AnalysisSnapshot {
     }
 
     fn project_symbol_available(&self, path: &Path, symbol: &ProjectSymbol) -> bool {
+        if self
+            .symbol_visibility
+            .get(path)
+            .is_some_and(|visible| !visible.contains(&symbol.path))
+        {
+            return false;
+        }
         symbol.context.is_none_or(|context| {
             if let Some(declaration) = self
                 .project_root(path)
@@ -926,6 +954,9 @@ impl AnalysisSnapshot {
                                 .is_some_and(|group| {
                                     group.iter().any(|candidate| {
                                         candidate.kind == symbol.kind
+                                            && self.symbol_visibility.get(path).is_none_or(
+                                                |visible| visible.contains(&candidate.path),
+                                            )
                                             && (candidate.context.is_none()
                                                 || candidate.context == Some(*side))
                                     })
@@ -1595,7 +1626,11 @@ impl AnalysisSnapshot {
                 .project_symbols
                 .get(&root)
                 .and_then(|symbols| symbols.get(label))
-                .and_then(|group| group.first())
+                .and_then(|group| {
+                    group
+                        .iter()
+                        .find(|symbol| self.project_symbol_available(path, symbol))
+                })
         {
             return symbol.documentation.clone();
         }
@@ -2134,7 +2169,6 @@ impl AnalyzedFile {
                 ast: ast.clone(),
                 diagnostics: diagnostics.clone(),
                 syntax_valid,
-                exports: Default::default(),
                 imports: Default::default(),
             }),
             diagnostics,
@@ -2492,6 +2526,26 @@ impl Visitor for ImportBindingCollector<'_> {
 }
 
 fn exported_table_members(file: &AnalyzedFile, export_type: &str) -> HashMap<String, ImportMember> {
+    let export_type = crate::compiler::typecheck::editor_unwrap_type(export_type);
+    let variants = crate::compiler::typecheck::editor_type_parts(export_type, '|');
+    if variants.len() > 1 {
+        let mut common = exported_table_members(file, variants[0]);
+        for variant in &variants[1..] {
+            let other = exported_table_members(file, variant);
+            common.retain(|name, member| {
+                let Some(candidate) = other.get(name) else {
+                    return false;
+                };
+                if member.type_name != candidate.type_name {
+                    member.type_name =
+                        format!("({}) | ({})", member.type_name, candidate.type_name);
+                    member.signature = None;
+                }
+                true
+            });
+        }
+        return common;
+    }
     let source = &file.source;
     let prepared = &file.prepared;
     let ast = &file.parsed.ast;

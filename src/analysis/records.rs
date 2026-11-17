@@ -1,7 +1,7 @@
 use super::*;
 use crate::compiler::{
     declarations::TypeAlias,
-    typecheck::{editor_resolve_alias, editor_type_fields, editor_type_parts},
+    typecheck::{editor_resolve_alias, editor_type_fields, editor_type_parts, editor_unwrap_type},
 };
 
 #[derive(Clone)]
@@ -138,10 +138,9 @@ impl AnalysisSnapshot {
             && let Some(index) = self.project_symbols.get(&root)
         {
             for group in index.values() {
-                if let Some(project_symbol) = group
-                    .iter()
-                    .find(|s| s.kind == ProjectSymbolKind::TypeAlias)
-                    && let Some(file) = self.files.get(&project_symbol.path)
+                if let Some(project_symbol) = group.iter().find(|s| {
+                    s.kind == ProjectSymbolKind::TypeAlias && self.project_symbol_available(path, s)
+                }) && let Some(file) = self.files.get(&project_symbol.path)
                     && let Some(symbol) = file
                         .symbols
                         .iter()
@@ -187,10 +186,7 @@ impl AnalysisSnapshot {
             if depth > 32 {
                 return Vec::new();
             }
-            let mut ty = ty.trim();
-            if ty.starts_with('(') && ty.ends_with(')') {
-                ty = &ty[1..ty.len() - 1];
-            }
+            let ty = editor_unwrap_type(ty);
             let union = editor_type_parts(ty, '|');
             if union.len() > 1 {
                 let mut common = fields(union[0], aliases, docs, &mut seen.clone(), depth + 1);

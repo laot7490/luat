@@ -6,8 +6,6 @@ mod lower;
 pub(crate) mod syntax;
 pub(crate) mod typecheck;
 
-type ExportCache = std::sync::Arc<std::sync::Mutex<Option<(Vec<(String, String)>, String)>>>;
-
 #[derive(Clone)]
 pub(crate) struct ParsedSource {
     pub source: String,
@@ -15,7 +13,6 @@ pub(crate) struct ParsedSource {
     pub ast: full_moon::ast::Ast,
     pub diagnostics: Vec<Diagnostic>,
     pub syntax_valid: bool,
-    pub exports: ExportCache,
     pub imports:
         std::sync::Arc<std::sync::OnceLock<Result<Vec<imports::ImportCall>, CompileError>>>,
 }
@@ -36,7 +33,6 @@ impl ParsedSource {
             ast: parsed.into_ast(),
             diagnostics,
             syntax_valid,
-            exports: Default::default(),
             imports: Default::default(),
         }
     }
@@ -54,30 +50,23 @@ impl ParsedSource {
             .clone()
     }
 
-    pub fn export_type(&self, imports: &std::collections::HashMap<String, String>) -> String {
-        let mut key = imports
-            .iter()
-            .map(|(name, ty)| (name.clone(), ty.clone()))
-            .collect::<Vec<_>>();
-        key.sort();
-        let mut cache = self.exports.lock().unwrap();
-        if let Some((cached_key, result)) = cache.as_ref()
-            && cached_key == &key
-        {
-            return result.clone();
+    pub(crate) fn contextual_export_type(
+        &self,
+        imports: &std::collections::HashMap<String, String>,
+        declarations: &DeclarationSet,
+        context: Option<ExecutionContext>,
+    ) -> String {
+        if !self.syntax_valid {
+            return "any".into();
         }
-        let result = if !self.syntax_valid {
-            "any".into()
-        } else {
-            typecheck::infer_module_export_type_from_ast(
-                &self.source,
-                &self.prepared,
-                &self.ast,
-                imports,
-            )
-        };
-        *cache = Some((key, result.clone()));
-        result
+        typecheck::infer_module_export_type_context(
+            &self.source,
+            &self.prepared,
+            &self.ast,
+            imports,
+            declarations,
+            context,
+        )
     }
 
     pub fn check(
@@ -334,30 +323,6 @@ pub(crate) fn validate_package_return(source: &str) -> Result<(), CompileError> 
             "Package modules must end with a top-level return value (not nil)".into(),
         )],
     })
-}
-
-pub(crate) fn infer_contextual_export(
-    source: &str,
-    imports: &std::collections::HashMap<String, String>,
-    declarations: &DeclarationSet,
-    context: Option<ExecutionContext>,
-) -> String {
-    let parsed = ParsedSource::new_prepared(source, syntax::prepare(source));
-    typecheck::infer_module_export_type_context(
-        source,
-        &parsed.prepared,
-        &parsed.ast,
-        imports,
-        declarations,
-        context,
-    )
-}
-
-pub(crate) fn infer_module_export_type(
-    source: &str,
-    imports: &std::collections::HashMap<String, String>,
-) -> String {
-    typecheck::infer_module_export_type(source, imports)
 }
 
 #[cfg(test)]
