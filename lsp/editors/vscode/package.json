@@ -4,7 +4,7 @@
 	"description": "Language support for typed Lua targeting CfxLua.",
 	"icon": "images/logo.png",
 	"publisher": "luat",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -17,7 +17,10 @@
 		"Programming Languages"
 	],
 	"main": "./out/extension.js",
-	"activationEvents": ["onLanguage:lua", "workspaceContains:luat-package.toml"],
+	"activationEvents": [
+		"onLanguage:lua",
+		"workspaceContains:luat-package.toml"
+	],
 	"files": [
 		"images/logo.png",
 		"out/extension.js",
