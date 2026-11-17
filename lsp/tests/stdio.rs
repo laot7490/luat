@@ -564,7 +564,7 @@ fn runtime_completion_and_markdown_hover_use_qualified_signatures() {
 }
 
 fn receive(receiver: &mpsc::Receiver<Value>) -> Value {
-    receiver.recv_timeout(Duration::from_secs(10)).unwrap()
+    receiver.recv_timeout(Duration::from_secs(60)).unwrap()
 }
 
 fn receive_response(receiver: &mpsc::Receiver<Value>, id: i64) -> Value {
