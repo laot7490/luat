@@ -112,18 +112,23 @@ async function resolve() {
 	if (process.env.GITHUB_REF !== "refs/heads/main") throw new Error("Run the release coordinator from main");
 	const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
 	if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch") {
-		const { product, release_tag: tag } = event.inputs;
-		const taggedVersion = tagVersion(product, tag);
-		let tagged;
-		try {
-			tagged = git(["rev-parse", "--verify", `refs/tags/${tag}^{commit}`]);
-		} catch (error) {
-			if (error.status !== 128) throw error;
+		const tags = Object.fromEntries(["cli", "lsp"].map((product) => [product, event.inputs[`${product}_tag`]?.trim() ?? ""]));
+		if (!tags.cli && !tags.lsp) throw new Error("Enter at least one release tag");
+		let sha;
+		for (const product of ["cli", "lsp"]) {
+			const tag = tags[product];
+			if (!tag) continue;
+			const taggedVersion = tagVersion(product, tag);
+			let tagged;
+			try { tagged = git(["rev-parse", "--verify", `refs/tags/${tag}^{commit}`]); }
+			catch (error) { if (error.status !== 128) throw error; }
+			const productSha = tagged ? resolveSource(product, tag, null) : validateSha(process.env.GITHUB_SHA);
+			if (sha && sha !== productSha) throw new Error("Selected release tags must resolve to the same commit");
+			sha = productSha;
+			if (manifestAt(sha, product) !== taggedVersion) throw new Error(`${product} release tag does not match its manifest`);
+			if (!tagged) resolveSource(product, tag, sha);
 		}
-		const sha = tagged ? resolveSource(product, tag, null) : validateSha(process.env.GITHUB_SHA);
-		if (manifestAt(sha, product) !== taggedVersion) throw new Error("Release tag does not match the selected product manifest");
-		if (!tagged) resolveSource(product, tag, sha);
-		await output({ source_sha: sha, cli_tag: product === "cli" ? tag : "", lsp_tag: product === "lsp" ? tag : "" });
+		await output({ source_sha: sha, cli_tag: tags.cli, lsp_tag: tags.lsp });
 	} else {
 		const sha = validateSha(process.env.GITHUB_SHA);
 		const before = validateSha(event.before);
