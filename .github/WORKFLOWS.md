@@ -34,7 +34,7 @@ Creating a GitHub Release or pushing a tag alone does not start publication. Aut
 
 ## Recovery
 
-Prefer **Re-run failed jobs** in the original run. To recover through a new run, open **Release - CLI and Language Server**, select master, choose `cli` or `lsp`, and enter the existing stable tag. The tag must be reachable from master and match its product manifest. Source checkout uses the tag's resolved commit, never the selected branch's latest code.
+Prefer **Re-run failed jobs** in the original run. To recover through a new run, open **Release - CLI and Language Server**, select master, and enter the existing tag in `cli_tag`, `lsp_tag`, or both. Leave the other field blank to skip that product. Tags must be reachable from master, match their product manifests, and resolve to the same commit when recovering both. Source checkout uses the tag's resolved commit, never the selected branch's latest code.
 
 New-run recovery downloads the original prepared artifact referenced by the draft release. These artifacts are retained for 90 days; expired artifacts require explicit recovery of the original files. Rebuilding and replacing existing published bytes is deliberately rejected. Re-running all jobs in an existing run can hit immutable artifact-name conflicts; rerun only failed jobs or use a new manual recovery run.
 

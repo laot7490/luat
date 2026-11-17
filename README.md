@@ -117,16 +117,31 @@ print(settings.greeting)
 The LuaT community registry supports LuaT/Lua modules and optional declarations. Packages declare shared, client and server contexts in `luat-package.toml`; projects use `luat.toml`. Install one from your project folder:
 
 ```bash
-luat add @types/example
+luat add example
 ```
 
 You can install community packages via CLI:
 
 ```bash
-luat add @types/example@1.0.0
+luat add example@1.0.0
 luat install
-luat remove @types/example
+luat remove example
 ```
+
+Package declarations are available automatically after installation; no type import or extra declaration glob is needed. This includes runtime packages. Shared types work on both sides; client and server declarations stay in their matching context.
+
+```lua
+const player: LuaTExampleType = { id = 15 }
+```
+
+Load runtime modules explicitly and assign their returned API to a variable:
+
+```lua
+local api = import('my-package')
+api.run()
+```
+
+Here `my-package` represents an installed runtime dependency. Re-exports such as `return import('./api')` remain supported. Declaration files describe types and ambient globals; they do not load runtime implementations. Packages are checked against their own declarations and dependency chain, independently of project-local declarations.
 
 The community registry is [luat-packages](https://github.com/laot7490/luat-packages). See the registry’s [contribution guide](https://github.com/laot7490/luat-packages/blob/main/CONTRIBUTING.md) for the walkthrough.
 
