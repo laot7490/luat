@@ -1,18 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use super::*;
 use crate::ExecutionContext;
-use crate::compiler::{
-    collect_imports,
-    imports::{ImportCall, lua_string},
-};
+use crate::compiler::imports::{ImportCall, lua_string};
 
 pub(crate) type SourceParser<'a> =
     dyn Fn(&Path, &str) -> Result<std::sync::Arc<crate::compiler::ParsedSource>, BuildError> + 'a;
 
 #[derive(Clone, Default)]
 pub(crate) struct ImportPlan {
+    pub(super) declaration_sets: HashMap<Option<PathBuf>, Arc<DeclarationSet>>,
+    contextual_exports: HashMap<(PathBuf, Option<ExecutionContext>), String>,
     pub texts: HashMap<PathBuf, String>,
+    pub parsed: HashMap<PathBuf, std::sync::Arc<crate::compiler::ParsedSource>>,
     pub resolved: HashMap<PathBuf, HashMap<String, String>>,
     pub import_types: HashMap<PathBuf, HashMap<String, String>>,
     pub contextual_import_types:
@@ -249,10 +250,12 @@ fn output_path_for(id: &str, out_dir: &Path) -> String {
 }
 
 impl Project {
+    #[cfg(test)]
     pub(super) fn analyze_imports(&self) -> Result<ImportPlan, BuildError> {
         self.analyze_imports_with_overlays(&HashMap::new())
     }
 
+    #[cfg(test)]
     pub(super) fn analyze_imports_with_overlays(
         &self,
         overlays: &HashMap<PathBuf, String>,
@@ -265,6 +268,17 @@ impl Project {
         overlays: &HashMap<PathBuf, String>,
         parse: Option<&SourceParser<'_>>,
         previous: Option<&ImportPlan>,
+    ) -> Result<ImportPlan, BuildError> {
+        self.analyze_imports_incremental(overlays, parse, previous, None, &mut HashMap::new())
+    }
+
+    pub(super) fn analyze_imports_incremental(
+        &self,
+        overlays: &HashMap<PathBuf, String>,
+        parse: Option<&SourceParser<'_>>,
+        previous: Option<&ImportPlan>,
+        reuse: Option<&ImportPlan>,
+        declarations: &mut ScopedDeclarations,
     ) -> Result<ImportPlan, BuildError> {
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
@@ -374,17 +388,27 @@ impl Project {
                     source,
                 })?,
             };
-            self.validate_package_return(&path, &source)?;
-            let calls = (if let Some(parse) = parse {
-                let parsed = parse(&path, &source)?;
-                parsed.import_calls()
+            let parsed = if let Some(parse) = parse {
+                parse(&path, &source)?
             } else {
-                collect_imports(&source)
-            })
-            .map_err(|error| BuildError::Compile {
+                reuse
+                    .and_then(|old| old.parsed.get(&path))
+                    .filter(|old| old.source == source)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Arc::new(crate::compiler::ParsedSource::new_prepared(
+                            &source,
+                            crate::compiler::syntax::prepare(&source),
+                        ))
+                    })
+            };
+            self.validate_package_return(&path, &parsed)?;
+            let calls = parsed.import_calls().map_err(|error| BuildError::Compile {
                 path: path.clone(),
                 error,
             })?;
+            plan.parsed
+                .insert(path.clone(), std::sync::Arc::clone(&parsed));
             plan.texts.insert(path.clone(), source.clone());
             plan.calls.insert(path.clone(), calls.clone());
             let mut module = Module {
@@ -477,36 +501,24 @@ impl Project {
         }
 
         let mut export_types = HashMap::<(String, Option<ExecutionContext>), String>::new();
-        let mut inference_declarations = HashMap::new();
+
         for id in dependency_order {
             let module = &modules[&id];
             plan.order.push(module.path.clone());
-            let owner_root = self
-                .package_sources
-                .get(&module.path)
-                .map(|owner| owner.root.clone())
-                .unwrap_or_else(|| self.root.clone());
-            if !inference_declarations.contains_key(&owner_root) {
-                inference_declarations.insert(
-                    owner_root.clone(),
-                    self.read_declarations_for(Some(&module.path), overlays)?,
-                );
+            let owner_root = self.declaration_owner(Some(&module.path));
+            if !plan.declaration_sets.contains_key(&owner_root) {
+                let set =
+                    self.cached_declarations(Some(&module.path), &plan.texts, declarations)?;
+                plan.declaration_sets.insert(owner_root.clone(), set);
             }
-            let declarations = &inference_declarations[&owner_root];
+            let declarations = &plan.declaration_sets[&owner_root];
             let contexts = plan
                 .execution_contexts
                 .get(&module.path)
                 .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
                 .filter(|contexts| !contexts.is_empty())
                 .unwrap_or_else(|| vec![None]);
-            let parsed = if let Some(parse) = parse {
-                parse(&module.path, &module.source)?
-            } else {
-                std::sync::Arc::new(crate::compiler::ParsedSource::new_prepared(
-                    &module.source,
-                    crate::compiler::syntax::prepare(&module.source),
-                ))
-            };
+            let parsed = std::sync::Arc::clone(&plan.parsed[&module.path]);
             let mut exports = Vec::new();
             let mut imports = HashMap::<String, Vec<String>>::new();
             for context in contexts {
@@ -520,8 +532,24 @@ impl Project {
                         )
                     })
                     .collect::<HashMap<String, String>>();
-                let export_type =
-                    parsed.contextual_export_type(&import_types, declarations, context);
+                let key = (module.path.clone(), context);
+                let export_type = reuse
+                    .filter(|old| {
+                        old.parsed
+                            .get(&module.path)
+                            .is_some_and(|old| Arc::ptr_eq(old, &parsed))
+                            && old
+                                .declaration_sets
+                                .get(&owner_root)
+                                .is_some_and(|old| Arc::ptr_eq(old, declarations))
+                            && old.contextual_import_types.get(&key) == Some(&import_types)
+                    })
+                    .and_then(|old| old.contextual_exports.get(&key))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        parsed.contextual_export_type(&import_types, declarations, context)
+                    });
+                plan.contextual_exports.insert(key, export_type.clone());
                 for (specifier, ty) in &import_types {
                     imports
                         .entry(specifier.clone())

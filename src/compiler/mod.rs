@@ -166,32 +166,38 @@ pub(crate) fn compile_project_source_unformatted_with_set(
     import_types: Option<&std::collections::HashMap<String, String>>,
     execution_context: Option<ExecutionContext>,
 ) -> Result<String, CompileError> {
-    if let Some(error) = syntax::invalid_type_alias_error(source) {
-        return Err(error);
-    }
-    let prepared = syntax::prepare(source);
-    let lua_version = LuaVersion::cfxlua().with_luau();
-    let parsed = full_moon::parse_fallible(&prepared.text, lua_version);
-    if !parsed.errors().is_empty() {
-        return Err(CompileError {
-            diagnostics: parser_diagnostics(parsed.errors(), "", source, |offset| {
-                prepared.original_offset(offset)
-            }),
-        });
-    }
-
-    let ast = parsed.into_ast();
-    self::imports::analyze(source, &prepared, &ast, imports.is_some())?;
-    check_ast(
-        source,
-        &prepared,
-        &ast,
+    let parsed = ParsedSource::new_prepared(source, syntax::prepare(source));
+    compile_parsed_source_unformatted_with_set(
+        &parsed,
         declarations,
+        imports,
+        import_types,
+        execution_context,
+    )
+}
+
+pub(crate) fn compile_parsed_source_unformatted_with_set(
+    parsed: &ParsedSource,
+    declarations: &DeclarationSet,
+    imports: Option<&std::collections::HashMap<String, String>>,
+    import_types: Option<&std::collections::HashMap<String, String>>,
+    execution_context: Option<ExecutionContext>,
+) -> Result<String, CompileError> {
+    parsed.check(
+        declarations,
+        imports.is_some(),
         import_types,
         execution_context,
     )?;
+    lower_parsed_source(parsed, imports)
+}
 
-    let lowered = lower::lower(source, &prepared, &ast)?;
+pub(crate) fn lower_parsed_source(
+    parsed: &ParsedSource,
+    imports: Option<&std::collections::HashMap<String, String>>,
+) -> Result<String, CompileError> {
+    let (source, prepared, ast) = (&parsed.source, &parsed.prepared, &parsed.ast);
+    let lowered = lower::lower(source, prepared, ast)?;
     let lowered = if let Some(imports) = imports {
         self::imports::rewrite(&lowered, imports)?
     } else {
@@ -219,7 +225,8 @@ pub(crate) fn check_project_source(
     check_project_source_with_set(source, &declarations, project_context, import_types, None)
 }
 
-pub(crate) fn check_project_source_with_set(
+#[cfg(test)]
+fn check_project_source_with_set(
     source: &str,
     declarations: &DeclarationSet,
     project_context: bool,
@@ -250,19 +257,6 @@ pub(crate) fn check_project_source_with_set(
     )
 }
 
-pub(crate) fn collect_imports(source: &str) -> Result<Vec<imports::ImportCall>, CompileError> {
-    let prepared = syntax::prepare(source);
-    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-    if !parsed.errors().is_empty() {
-        return Err(CompileError {
-            diagnostics: parser_diagnostics(parsed.errors(), "", source, |offset| {
-                prepared.original_offset(offset)
-            }),
-        });
-    }
-    imports::analyze(source, &prepared, &parsed.into_ast(), true)
-}
-
 fn check_ast(
     source: &str,
     prepared: &syntax::PreparedSource,
@@ -286,18 +280,19 @@ fn check_ast(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn validate_package_return(source: &str) -> Result<(), CompileError> {
+    validate_parsed_package_return(&ParsedSource::new_prepared(source, syntax::prepare(source)))
+}
+
+pub(crate) fn validate_parsed_package_return(parsed: &ParsedSource) -> Result<(), CompileError> {
     use full_moon::ast::{Expression, LastStmt};
-    let prepared = syntax::prepare(source);
-    let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-    if !parsed.errors().is_empty() {
+    if !parsed.syntax_valid {
         return Err(CompileError {
-            diagnostics: parser_diagnostics(parsed.errors(), "", source, |offset| {
-                prepared.original_offset(offset)
-            }),
+            diagnostics: parsed.diagnostics.clone(),
         });
     }
-    let ast = parsed.into_ast();
+    let (source, ast) = (&parsed.source, &parsed.ast);
     fn nil(expression: &Expression) -> bool {
         match expression {
             Expression::Parentheses { expression, .. } => nil(expression),
@@ -327,6 +322,7 @@ pub(crate) fn validate_package_return(source: &str) -> Result<(), CompileError> 
 
 #[cfg(test)]
 mod tests {
+
     use super::{check_source_with_declarations, compile_source, compile_source_with_declarations};
 
     #[test]

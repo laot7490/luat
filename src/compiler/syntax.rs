@@ -150,9 +150,8 @@ fn normalize_type_syntax(source: &str, arrays: bool) -> (String, Vec<usize>) {
     }
     let mut text = source.to_owned();
     let mut offsets = (0..=source.len()).collect::<Vec<_>>();
-    loop {
+    if arrays {
         let tokens = significant_tokens(&text);
-        if !arrays && !tokens.iter().any(|token| matches!(token.token_type(), TokenType::Identifier { identifier } if identifier.to_string() == "integer")) { break; }
         let candidates = tokens
             .windows(2)
             .enumerate()
@@ -167,21 +166,19 @@ fn normalize_type_syntax(source: &str, arrays: bool) -> (String, Vec<usize>) {
                 )
             })
             .collect::<Vec<_>>();
-        if arrays && candidates.is_empty() {
-            break;
+        if candidates.is_empty() {
+            return (text, offsets);
         }
         let mut masked = text.as_bytes().to_vec();
-        if arrays {
-            for &(_, start, end) in &candidates {
-                for byte in &mut masked[start..end] {
-                    if !matches!(*byte, b'\r' | b'\n') {
-                        *byte = b' ';
-                    }
+        for &(_, start, end) in &candidates {
+            for byte in &mut masked[start..end] {
+                if !matches!(*byte, b'\r' | b'\n') {
+                    *byte = b' ';
                 }
             }
-            for offset in optional_field_markers(&tokens) {
-                masked[offset] = b' ';
-            }
+        }
+        for offset in optional_field_markers(&tokens) {
+            masked[offset] = b' ';
         }
         let parsed = full_moon::parse_fallible(
             &String::from_utf8(masked).unwrap(),
@@ -189,29 +186,68 @@ fn normalize_type_syntax(source: &str, arrays: bool) -> (String, Vec<usize>) {
         );
         let mut ranges = TypeRanges::default();
         ranges.visit_ast(&parsed.into_ast());
-        if !arrays {
-            ranges.integers.sort_unstable();
-            ranges.integers.dedup();
-            for (start, end) in ranges.integers.into_iter().rev() {
-                replace_mapped(&mut text, &mut offsets, start, end, "number");
-            }
-            break;
+        let mut starts = std::collections::HashMap::<usize, usize>::new();
+        for (begin, end) in ranges.types {
+            starts
+                .entry(end)
+                .and_modify(|start| *start = (*start).max(begin))
+                .or_insert(begin);
         }
-        let next = candidates.into_iter().find_map(|(previous, start, end)| {
-            ranges
-                .types
-                .iter()
-                .filter(|(_, finish)| *finish == previous)
-                .max_by_key(|(begin, _)| begin)
-                .map(|(begin, _)| (*begin, start, end))
-        });
-        let Some((begin, start, end)) = next else {
-            break;
-        };
-        // Keep trivia between the brackets, including comments and line breaks.
-        replace_mapped(&mut text, &mut offsets, end - 1, end, "}");
-        replace_mapped(&mut text, &mut offsets, start, start + 1, " ");
-        replace_mapped(&mut text, &mut offsets, begin, begin, "{");
+        let mut edits = Vec::new();
+        let mut index = 0;
+        while index < candidates.len() {
+            let (previous, start, mut end) = candidates[index];
+            let Some(&begin) = starts.get(&previous) else {
+                index += 1;
+                continue;
+            };
+            let mut depth = 1;
+            edits.push((start, start + 1, " "));
+            edits.push((end - 1, end, "}"));
+            index += 1;
+            while index < candidates.len() && candidates[index].0 == end {
+                let (_, start, next_end) = candidates[index];
+                edits.push((start, start + 1, " "));
+                edits.push((next_end - 1, next_end, "}"));
+                end = next_end;
+                depth += 1;
+                index += 1;
+            }
+            for _ in 0..depth {
+                edits.push((begin, begin, "{"));
+            }
+        }
+        if edits.is_empty() {
+            return (text, offsets);
+        }
+        edits.sort_unstable_by_key(|&(start, end, _)| (start, end));
+        let mut output = String::with_capacity(text.len());
+        let mut mapping = Vec::with_capacity(offsets.len());
+        mapping.push(0);
+        let mut cursor = 0;
+        for (start, end, replacement) in edits {
+            output.push_str(&text[cursor..start]);
+            mapping.extend(cursor + 1..=start);
+            output.push_str(replacement);
+            mapping.push(end);
+            cursor = end;
+        }
+        output.push_str(&text[cursor..]);
+        mapping.extend(cursor + 1..=text.len());
+        return (output, mapping);
+    }
+    {
+        if !text.contains("integer") {
+            return (text, offsets);
+        }
+        let parsed = full_moon::parse_fallible(&text, LuaVersion::cfxlua().with_luau());
+        let mut ranges = TypeRanges::default();
+        ranges.visit_ast(&parsed.into_ast());
+        ranges.integers.sort_unstable();
+        ranges.integers.dedup();
+        for (start, end) in ranges.integers.into_iter().rev() {
+            replace_mapped(&mut text, &mut offsets, start, end, "number");
+        }
     }
     (text, offsets)
 }

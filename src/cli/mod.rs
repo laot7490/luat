@@ -149,6 +149,20 @@ pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
 }
 
 fn run_project(command: &str, project: Project, pretty: bool) -> Result<(), (u8, String)> {
+    run_project_with(&project, pretty, || {
+        if command == "check" {
+            project.check()
+        } else {
+            project.build()
+        }
+    })
+}
+
+fn run_project_with(
+    project: &Project,
+    pretty: bool,
+    run: impl FnOnce() -> Result<luat::BuildResult, BuildError>,
+) -> Result<(), (u8, String)> {
     for warning in project.warnings() {
         eprintln!(
             "\n{} {warning}",
@@ -160,11 +174,7 @@ fn run_project(command: &str, project: Project, pretty: bool) -> Result<(), (u8,
         );
     }
     let started = Instant::now();
-    let result = if command == "check" {
-        project.check()
-    } else {
-        project.build()
-    };
+    let result = run();
     let result = result.map_err(|error| match error {
         BuildError::Compile { path, error } => {
             let code = if is_internal_error(&error) { 2 } else { 1 };

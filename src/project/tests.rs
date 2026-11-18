@@ -59,6 +59,55 @@ fn build_writes_dist_paths_and_keeps_old_output_on_compile_error() {
 }
 
 #[test]
+fn watch_session_reuses_unaffected_modules_and_recovers_from_failed_builds() {
+    let root = temp_project();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='watch-test'\n[fivem]\nclient=['src/*.luat']\n",
+    )
+    .unwrap();
+    let api = src.join("api.luat");
+    let main = src.join("main.luat");
+    fs::write(&api, "return { value = 1 }").unwrap();
+    fs::write(
+        &main,
+        "local api = import('./api')\nlocal value: number = api.value",
+    )
+    .unwrap();
+    let mut session = super::BuildSession::default();
+    let rebuild = |session: &mut super::BuildSession| {
+        Project::load(&root).unwrap().build_with_session(session)
+    };
+    rebuild(&mut session).unwrap();
+    let before = fs::read(root.join("dist/main.lua")).unwrap();
+    let parsed = session.previous.as_ref().unwrap().parsed[&main].clone();
+    fs::write(&api, "return { value = 'bad' }").unwrap();
+    assert!(rebuild(&mut session).is_err());
+    assert_eq!(before, fs::read(root.join("dist/main.lua")).unwrap());
+    let extra = src.join("extra.luat");
+    fs::write(&extra, "return true").unwrap();
+    assert!(rebuild(&mut session).is_err());
+    assert!(!root.join("dist/extra.lua").exists());
+    fs::write(&api, "return { value = 2 }").unwrap();
+    rebuild(&mut session).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &parsed,
+        &session.previous.as_ref().unwrap().parsed[&main]
+    ));
+    assert_eq!(before, fs::read(root.join("dist/main.lua")).unwrap());
+    fs::rename(extra, src.join("renamed.luat")).unwrap();
+    rebuild(&mut session).unwrap();
+    assert!(!root.join("dist/extra.lua").exists());
+    assert!(root.join("dist/renamed.lua").exists());
+    let output = fs::read(root.join("dist/renamed.lua")).unwrap();
+    Project::load(&root).unwrap().build().unwrap();
+    assert_eq!(output, fs::read(root.join("dist/renamed.lua")).unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn config_defaults_and_rejects_output_path_traversal() {
     let config = toml::from_str::<ProjectConfig>("[project]\nname='test'").unwrap();
     assert_eq!(config.compiler.out_dir, PathBuf::from("dist"));

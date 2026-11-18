@@ -12,11 +12,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::compiler::{
-    check_project_source_with_set, compile_project_source_unformatted_with_set,
-    declarations::{DeclarationSet, DeclarationSource},
-};
+use crate::compiler::declarations::{DeclarationSet, DeclarationSource};
 use crate::{CompileError, Diagnostic};
+
+type DeclarationInputs = Vec<(PathBuf, String)>;
+type ScopedDeclarations = HashMap<DeclarationInputs, std::sync::Arc<DeclarationSet>>;
+type Outputs = Vec<(PathBuf, String)>;
+type CompiledFiles = HashMap<PathBuf, (PathBuf, String)>;
+
+#[derive(Default)]
+pub struct BuildSession {
+    previous: Option<imports::ImportPlan>,
+    declarations: ScopedDeclarations,
+    compiled: CompiledFiles,
+    published: Option<(PathBuf, Outputs, String)>,
+}
 
 #[derive(Debug)]
 pub enum BuildError {
@@ -87,11 +97,6 @@ pub(crate) struct ResolvedImport {
 }
 
 pub(crate) type ResolvedImports = HashMap<PathBuf, HashMap<String, ResolvedImport>>;
-type SelectedCheck = (
-    BTreeSet<PathBuf>,
-    Result<BuildResult, BuildError>,
-    Option<ResolvedImports>,
-);
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct BuildResult {
@@ -559,73 +564,24 @@ impl Project {
         &self,
         overlays: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<BuildResult, BuildError> {
-        self.check_selected_with_overlays(overlays, None, None).1
-    }
-
-    fn check_selected_with_overlays(
-        &self,
-        overlays: &HashMap<PathBuf, String>,
-        changed_paths: Option<&BTreeSet<PathBuf>>,
-        cached_declarations: Option<&DeclarationSet>,
-    ) -> SelectedCheck {
-        let plan = match self.analyze_imports_with_overlays(overlays) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return (overlays.keys().cloned().collect(), Err(error), None);
-            }
-        };
-        let imports = self.resolved_imports(&plan);
-        let checked_paths = changed_paths.map_or_else(
-            || {
-                self.sources
-                    .iter()
-                    .filter(|file| file.output.is_some())
-                    .map(|file| file.input.clone())
-                    .collect()
-            },
-            |changed| self.dependent_source_paths(&plan, changed),
-        );
+        let mut cache = HashMap::new();
+        let mut plan = self.analyze_imports_incremental(overlays, None, None, None, &mut cache)?;
+        self.populate_declarations(&mut plan, &mut cache)?;
         let mut errors = Vec::new();
-        let owned_declarations;
-        let declarations = match cached_declarations {
-            Some(declarations) => declarations,
-            None => {
-                owned_declarations = match self.read_declarations_with_overlays(overlays) {
-                    Ok(declarations) => declarations,
-                    Err(error) => return (checked_paths, Err(error), Some(imports)),
-                };
-                &owned_declarations
-            }
-        };
         for file in &self.sources {
-            if !checked_paths.contains(&file.input) {
-                continue;
-            }
-            let Some(source) = plan.texts.get(&file.input) else {
+            let Some(parsed) = plan.parsed.get(&file.input) else {
                 continue;
             };
-            if file.output.is_none() {
-                continue;
-            }
             let contexts = plan
                 .execution_contexts
                 .get(&file.input)
                 .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
                 .filter(|contexts| !contexts.is_empty())
                 .unwrap_or_else(|| vec![None]);
-            let owned = if self.package_sources.contains_key(&file.input) {
-                match self.read_declarations_for(Some(&file.input), overlays) {
-                    Ok(value) => Some(value),
-                    Err(error) => return (checked_paths, Err(error), Some(imports)),
-                }
-            } else {
-                None
-            };
-            let declarations = owned.as_ref().unwrap_or(declarations);
+            let declarations = plan.declarations_for(self, Some(&file.input));
             let mut diagnostics = Vec::new();
             for context in contexts {
-                if let Err(error) = check_project_source_with_set(
-                    source,
+                if let Err(error) = parsed.check(
                     declarations,
                     true,
                     plan.contextual_import_types
@@ -644,9 +600,9 @@ impl Project {
             }
         }
         if !errors.is_empty() {
-            return (checked_paths, Err(compile_errors(errors)), Some(imports));
+            return Err(compile_errors(errors));
         }
-        (checked_paths, Ok(self.result(None, &plan)), Some(imports))
+        Ok(self.result(None, &plan))
     }
 
     pub(crate) fn resolved_imports(&self, plan: &imports::ImportPlan) -> ResolvedImports {
@@ -718,12 +674,33 @@ impl Project {
     }
 
     pub fn build(&self) -> Result<BuildResult, BuildError> {
-        Self::load(&self.config_path)?.build_current()
+        Self::load(&self.config_path)?.build_with_session(&mut BuildSession::default())
     }
 
+    #[cfg(test)]
     fn build_current(&self) -> Result<BuildResult, BuildError> {
-        let plan = self.analyze_imports()?;
-        let outputs = self.compile_all(&plan)?;
+        self.build_with_session(&mut BuildSession::default())
+    }
+
+    #[doc(hidden)]
+    pub fn build_with_session(
+        &self,
+        session: &mut BuildSession,
+    ) -> Result<BuildResult, BuildError> {
+        let mut plan = self.analyze_imports_incremental(
+            &HashMap::new(),
+            None,
+            None,
+            session.previous.as_ref(),
+            &mut session.declarations,
+        )?;
+        self.populate_declarations(&mut plan, &mut session.declarations)?;
+        session.declarations.retain(|_, declarations| {
+            plan.declaration_sets
+                .values()
+                .any(|set| std::sync::Arc::ptr_eq(set, declarations))
+        });
+        let (outputs, compiled) = self.compile_all(&plan, session)?;
         let mut package_ignores = Vec::new();
         for file in &self.sources {
             if self.package_sources.contains_key(&file.input)
@@ -756,26 +733,50 @@ impl Project {
         } else {
             self.manifest.clone()
         };
-        self.publish(&outputs, &manifest)?;
-        Ok(self.result(Some(self.output_dir.clone()), &plan))
+        let published = (self.output_dir.clone(), outputs, manifest);
+        if session.published.as_ref() != Some(&published)
+            || !self.output_dir.is_dir()
+            || !self.root.join("fxmanifest.lua").is_file()
+        {
+            self.publish(&published.1, &published.2)?;
+        }
+        let result = self.result(Some(self.output_dir.clone()), &plan);
+        session.published = Some(published);
+        session.previous = Some(plan);
+        session.compiled = compiled;
+        Ok(result)
     }
 
     fn compile_all(
         &self,
         plan: &imports::ImportPlan,
-    ) -> Result<Vec<(PathBuf, String)>, BuildError> {
+        session: &BuildSession,
+    ) -> Result<(Outputs, CompiledFiles), BuildError> {
         let mut outputs = Vec::new();
+        let mut compiled = HashMap::new();
         let mut errors = Vec::new();
-        let declarations = self.read_declarations()?;
         for file in &self.sources {
-            if !plan.texts.contains_key(&file.input) {
+            let Some(relative) = file
+                .output
+                .as_ref()
+                .filter(|_| plan.parsed.contains_key(&file.input))
+            else {
                 continue;
-            }
-            match self.compile(file, &declarations, plan) {
+            };
+            let reused = session
+                .previous
+                .as_ref()
+                .filter(|old| plan.same_compile_inputs(old, self, &file.input))
+                .and_then(|_| session.compiled.get(&file.input))
+                .filter(|(path, _)| path == relative);
+            let result = match reused {
+                Some((_, output)) => Ok(output.clone()),
+                None => self.compile(file, plan.declarations_for(self, Some(&file.input)), plan),
+            };
+            match result {
                 Ok(contents) => {
-                    if let Some(relative) = &file.output {
-                        outputs.push((relative.clone(), contents));
-                    }
+                    compiled.insert(file.input.clone(), (relative.clone(), contents.clone()));
+                    outputs.push((relative.clone(), contents));
                 }
                 Err(BuildError::Compile { path, error }) => errors.push((path, error)),
                 Err(BuildError::CompileMany(mut compile_errors)) => {
@@ -792,14 +793,15 @@ impl Project {
                 ));
                 outputs.extend(plan.entries.iter().cloned());
             }
-            Ok(outputs)
+            Ok((outputs, compiled))
         } else {
             Err(compile_errors(errors))
         }
     }
 
+    #[cfg(test)]
     fn read_declarations(&self) -> Result<DeclarationSet, BuildError> {
-        self.read_declarations_with_overlays(&std::collections::HashMap::new())
+        self.read_declarations_with_overlays(&HashMap::new())
     }
 
     pub(crate) fn read_declarations_with_overlays(
@@ -820,7 +822,92 @@ impl Project {
         path: Option<&Path>,
         overlays: &HashMap<PathBuf, String>,
     ) -> Result<DeclarationSet, BuildError> {
+        self.parse_declarations(&self.declaration_inputs(path, overlays)?)
+    }
+
+    fn populate_declarations(
+        &self,
+        plan: &mut imports::ImportPlan,
+        cache: &mut ScopedDeclarations,
+    ) -> Result<(), BuildError> {
+        for path in self
+            .package_declaration_roots
+            .keys()
+            .chain(
+                plan.parsed
+                    .keys()
+                    .filter(|path| self.package_sources.contains_key(*path)),
+            )
+            .map(|path| Some(path.as_path()))
+            .chain(std::iter::once(None))
+            .collect::<Vec<_>>()
+        {
+            let owner = self.declaration_owner(path);
+            if !plan.declaration_sets.contains_key(&owner) {
+                let declarations = self.cached_declarations(path, &plan.texts, cache)?;
+                plan.declaration_sets.insert(owner, declarations);
+            }
+        }
+        Ok(())
+    }
+
+    fn declaration_owner(&self, path: Option<&Path>) -> Option<PathBuf> {
+        path.and_then(|path| {
+            self.package_sources
+                .get(path)
+                .map(|source| &source.root)
+                .or_else(|| self.package_declaration_roots.get(path))
+        })
+        .or_else(|| self.package_root.then_some(&self.root))
+        .cloned()
+    }
+
+    fn cached_declarations(
+        &self,
+        path: Option<&Path>,
+        texts: &HashMap<PathBuf, String>,
+        cache: &mut ScopedDeclarations,
+    ) -> Result<std::sync::Arc<DeclarationSet>, BuildError> {
+        let inputs = self.declaration_inputs(path, texts)?;
+        if let Some(set) = cache.get(&inputs) {
+            return Ok(set.clone());
+        }
+        let set = std::sync::Arc::new(self.parse_declarations(&inputs)?);
+        cache.insert(inputs, set.clone());
+        Ok(set)
+    }
+
+    fn declaration_inputs(
+        &self,
+        path: Option<&Path>,
+        overlays: &HashMap<PathBuf, String>,
+    ) -> Result<DeclarationInputs, BuildError> {
         let package_scope = self.package_declaration_scope(path);
+        self.declarations
+            .iter()
+            .filter(|path| {
+                package_scope.as_ref().is_none_or(|roots| {
+                    self.package_declaration_roots
+                        .get(*path)
+                        .is_some_and(|root| roots.contains(root))
+                })
+            })
+            .map(|path| {
+                let text = overlays
+                    .get(path)
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| fs::read_to_string(path))
+                    .map_err(|source| BuildError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                Ok((path.clone(), text))
+            })
+            .collect()
+    }
+
+    fn parse_declarations(&self, inputs: &DeclarationInputs) -> Result<DeclarationSet, BuildError> {
         let mut sources = vec![
             DeclarationSource {
                 path: None,
@@ -853,34 +940,11 @@ impl Project {
                 text: include_str!("../../lsp/definitions/runtime-server.d.luat").to_owned(),
             },
         ];
-        sources.extend(
-            self.declarations
-                .iter()
-                .filter(|path| {
-                    package_scope.as_ref().is_none_or(|roots| {
-                        self.package_declaration_roots
-                            .get(*path)
-                            .is_some_and(|root| roots.contains(root))
-                    })
-                })
-                .map(|path| {
-                    overlays
-                        .get(path)
-                        .cloned()
-                        .map(Ok)
-                        .unwrap_or_else(|| fs::read_to_string(path))
-                        .map(|text| DeclarationSource {
-                            path: Some(path.clone()),
-                            context: None,
-                            text,
-                        })
-                        .map_err(|source| BuildError::Io {
-                            path: path.clone(),
-                            source,
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        sources.extend(inputs.iter().map(|(path, text)| DeclarationSource {
+            path: Some(path.clone()),
+            context: None,
+            text: text.clone(),
+        }));
         DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
             path: path.unwrap_or_else(|| self.config_path.clone()),
             error,
@@ -893,16 +957,8 @@ impl Project {
         declarations: &DeclarationSet,
         plan: &imports::ImportPlan,
     ) -> Result<String, BuildError> {
-        let source = &plan.texts[&file.input];
-        let owned_declarations = self
-            .package_sources
-            .contains_key(&file.input)
-            .then(|| self.read_declarations_for(Some(&file.input), &HashMap::new()))
-            .transpose()?;
-        let declarations = owned_declarations.as_ref().unwrap_or(declarations);
-        if file.output.is_none() {
-            return Ok(String::new());
-        }
+        let parsed = &plan.parsed[&file.input];
+        let source = &parsed.source;
         let contexts = plan
             .execution_contexts
             .get(&file.input)
@@ -910,21 +966,26 @@ impl Project {
             .filter(|contexts| !contexts.is_empty())
             .unwrap_or_else(|| vec![None]);
         let mut errors = Vec::new();
+        let imports = plan.resolved.get(&file.input);
         let mut compiled = None;
         for context in contexts {
-            match compile_project_source_unformatted_with_set(
-                source,
+            let result = parsed.check(
                 declarations,
-                plan.resolved.get(&file.input),
+                true,
                 plan.contextual_import_types
                     .get(&(file.input.clone(), context)),
                 context,
-            ) {
-                Ok(output) => {
-                    compiled.get_or_insert(output);
-                }
-                Err(error) => errors.push((file.input.clone(), error)),
-            };
+            );
+            let result = result.and_then(|()| {
+                compiled
+                    .get_or_insert_with(|| crate::compiler::lower_parsed_source(parsed, imports))
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(Clone::clone)
+            });
+            if let Err(error) = result {
+                errors.push((file.input.clone(), error));
+            }
         }
         if !errors.is_empty() {
             return Err(compile_errors(errors));
@@ -944,7 +1005,9 @@ impl Project {
                 error,
             })?
         } else {
-            compiled.unwrap_or_default()
+            compiled
+                .expect("checked at least one context")
+                .expect("lowering succeeded")
         };
         let generated = if plan.wrapped.contains(&file.input) {
             let id = file
@@ -962,10 +1025,13 @@ impl Project {
         } else {
             compiled
         };
-        crate::compiler::format_output(source, &generated).map_err(|error| BuildError::Compile {
-            path: file.input.clone(),
-            error,
-        })
+        let output = crate::compiler::format_output(source, &generated).map_err(|error| {
+            BuildError::Compile {
+                path: file.input.clone(),
+                error,
+            }
+        })?;
+        Ok(output)
     }
 
     fn result(&self, output_dir: Option<PathBuf>, plan: &imports::ImportPlan) -> BuildResult {
@@ -1333,3 +1399,37 @@ fn unique_sibling(target: &Path, kind: &str) -> Result<PathBuf, BuildError> {
 
 #[cfg(test)]
 mod tests;
+
+impl imports::ImportPlan {
+    fn declarations_for(
+        &self,
+        project: &Project,
+        path: Option<&Path>,
+    ) -> &std::sync::Arc<DeclarationSet> {
+        &self.declaration_sets[&project.declaration_owner(path)]
+    }
+
+    fn same_compile_inputs(&self, old: &Self, project: &Project, path: &Path) -> bool {
+        let owner = project.declaration_owner(Some(path));
+        old.parsed
+            .get(path)
+            .is_some_and(|parsed| std::sync::Arc::ptr_eq(parsed, &self.parsed[path]))
+            && old
+                .declaration_sets
+                .get(&owner)
+                .is_some_and(|set| std::sync::Arc::ptr_eq(set, &self.declaration_sets[&owner]))
+            && self.resolved.get(path) == old.resolved.get(path)
+            && self.wrapped.contains(path) == old.wrapped.contains(path)
+            && self.execution_contexts.get(path) == old.execution_contexts.get(path)
+            && [
+                None,
+                Some(crate::ExecutionContext::Client),
+                Some(crate::ExecutionContext::Server),
+            ]
+            .into_iter()
+            .all(|context| {
+                let key = (path.to_path_buf(), context);
+                self.contextual_import_types.get(&key) == old.contextual_import_types.get(&key)
+            })
+    }
+}

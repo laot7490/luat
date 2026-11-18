@@ -132,7 +132,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
         "\nSuccess: Watching {} for source and configuration changes",
         folder.display()
     );
-    build(&folder, pretty);
+    let mut session = luat::BuildSession::default();
+    build(Project::load(&folder).as_ref(), &mut session, pretty);
 
     loop {
         match receiver.recv() {
@@ -205,8 +206,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                         ),
                     ));
                 }
-                build(&folder, pretty);
-                if let Ok(project) = Project::load(&folder) {
+                let project = Project::load(&folder);
+                build(project.as_ref(), &mut session, pretty);
+                if let Ok(project) = project {
                     declarations = project.declaration_files().to_vec();
                     for directory in declarations
                         .iter()
@@ -243,10 +245,16 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     }
 }
 
-fn build(folder: &Path, pretty: bool) {
-    let result = Project::load(folder)
-        .map_err(|error| (2, super::render::render_build_error(&error, pretty)))
-        .and_then(|project| super::run_project("build", project, pretty));
+fn build(
+    project: Result<&Project, &luat::BuildError>,
+    session: &mut luat::BuildSession,
+    pretty: bool,
+) {
+    let result = project
+        .map_err(|error| (2, super::render::render_build_error(error, pretty)))
+        .and_then(|project| {
+            super::run_project_with(project, pretty, || project.build_with_session(session))
+        });
     if let Err((_, message)) = result {
         eprintln!("\n{}", luat::output::stderr_message(&message));
     }
@@ -288,32 +296,41 @@ fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) 
             | EventKind::Remove(_)
             | EventKind::Modify(notify::event::ModifyKind::Name(_))
     );
-    event.paths.iter().any(|path| {
-        path == config
-            || path
-                == &config
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join("luat.lock")
-            || path
-                == config
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(".luat/install.lock")
-                    .as_path()
-            || path.starts_with(
-                config
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(".luat"),
-            )
-            || declarations.iter().any(|declaration| path == declaration)
-            || path.starts_with(src)
-                && (path
-                    .extension()
-                    .is_some_and(|extension| extension == "luat" || extension == "lua")
-                    || structural && path.extension().is_none())
-    })
+    event.need_rescan()
+        || (structural && event.paths.is_empty())
+        || event.paths.iter().any(|path| {
+            path == config
+                || path
+                    == &config
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join("luat.lock")
+                || path
+                    == config
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".luat/install.lock")
+                        .as_path()
+                || path.starts_with(
+                    config
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(".luat"),
+                )
+                || declarations.iter().any(|declaration| {
+                    path == declaration
+                        || (structural
+                            && path.parent() == declaration.parent()
+                            && path
+                                .file_name()
+                                .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat")))
+                })
+                || path.starts_with(src)
+                    && (path
+                        .extension()
+                        .is_some_and(|extension| extension == "luat" || extension == "lua")
+                        || structural && path.extension().is_none())
+        })
 }
 
 #[cfg(test)]

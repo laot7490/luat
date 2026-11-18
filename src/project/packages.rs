@@ -180,13 +180,13 @@ impl Project {
     pub(super) fn validate_package_return(
         &self,
         path: &Path,
-        source: &str,
+        parsed: &crate::compiler::ParsedSource,
     ) -> Result<(), BuildError> {
         if !self.package_sources.contains_key(path) {
             return Ok(());
         }
         if path.extension().is_some_and(|extension| extension == "lua") {
-            let parsed = full_moon::parse_fallible(source, full_moon::LuaVersion::cfxlua());
+            let parsed = full_moon::parse_fallible(&parsed.source, full_moon::LuaVersion::cfxlua());
             if !parsed.errors().is_empty() {
                 return Err(BuildError::Configuration {
                     path: path.into(),
@@ -194,9 +194,11 @@ impl Project {
                 });
             }
         }
-        crate::compiler::validate_package_return(source).map_err(|error| BuildError::Compile {
-            path: path.into(),
-            error,
+        crate::compiler::validate_parsed_package_return(parsed).map_err(|error| {
+            BuildError::Compile {
+                path: path.into(),
+                error,
+            }
         })
     }
 }

@@ -724,6 +724,10 @@ impl TypeChecker<'_> {
     }
 
     fn infer_expression_type(&self, expression: &str) -> String {
+        self.infer_expression_text(expression, true)
+    }
+
+    fn infer_expression_text(&self, expression: &str, parse: bool) -> String {
         let mut expression = expression.trim();
         while expression.starts_with('(')
             && matching_delimiter(expression, 0, '(', ')') == Some(expression.len() - 1)
@@ -735,19 +739,6 @@ impl TypeChecker<'_> {
         }
         if let Some(literal) = infer_literal_type(expression) {
             return literal.to_owned();
-        }
-        if expression.starts_with("if ") {
-            let parsed = full_moon::parse_fallible(
-                &format!("local __luat_type = {expression}"),
-                full_moon::LuaVersion::cfxlua().with_luau(),
-            );
-            if parsed.errors().is_empty() {
-                let mut initializer = InitializerCollector::default();
-                initializer.visit_ast(&parsed.into_ast());
-                if let Some(expression) = initializer.expression {
-                    return self.infer_ast_expression_type(&expression);
-                }
-            }
         }
         if expression.starts_with("function") {
             let parsed = full_moon::parse_fallible(
@@ -796,20 +787,23 @@ impl TypeChecker<'_> {
         if let Some(ty) = self.global_types.get(expression) {
             return ty.clone();
         }
-        let parsed = full_moon::parse_fallible(
-            &format!("local __luat_value = {expression}"),
-            LuaVersion::cfxlua().with_luau(),
-        );
-        if parsed.errors().is_empty() {
-            let mut collector = InitializerCollector::default();
-            collector.visit_ast(&parsed.into_ast());
-            if let Some(
-                node @ (Expression::BinaryOperator { .. }
-                | Expression::UnaryOperator { .. }
-                | Expression::TypeAssertion { .. }),
-            ) = collector.expression
-            {
-                return self.infer_ast_expression_type(&node);
+        if parse {
+            let parsed = full_moon::parse_fallible(
+                &format!("local __luat_value = {expression}"),
+                LuaVersion::cfxlua().with_luau(),
+            );
+            if parsed.errors().is_empty() {
+                let mut collector = InitializerCollector::default();
+                collector.visit_ast(&parsed.into_ast());
+                if let Some(
+                    node @ (Expression::BinaryOperator { .. }
+                    | Expression::UnaryOperator { .. }
+                    | Expression::TypeAssertion { .. }
+                    | Expression::IfExpression(_)),
+                ) = collector.expression
+                {
+                    return self.infer_expression_node(&node, false);
+                }
             }
         }
         if let Some((receiver, key)) = split_index_access(expression) {
@@ -830,8 +824,8 @@ impl TypeChecker<'_> {
                 &expression[open + 1..matching_delimiter(expression, open, '(', ')').unwrap()],
                 ',',
             );
-            if let Some(signature) = self.resolve_call_signature(name, &args) {
-                return infer_generic_return(&signature, &args, self);
+            if let Some((signature, types)) = self.resolve_call_signature(name, &args) {
+                return infer_generic_return(&signature, &types, self);
             }
             return "any".to_owned();
         }
@@ -878,39 +872,46 @@ impl TypeChecker<'_> {
         &self,
         name: &str,
         arguments: &[T],
-    ) -> Option<FunctionSignature> {
+    ) -> Option<(FunctionSignature, Vec<String>)> {
         let signatures = self.resolve_function_signatures(name);
+        if signatures.is_empty() {
+            return None;
+        }
+        let argument_types = arguments
+            .iter()
+            .map(|argument| self.infer_expression_type(argument.as_ref()))
+            .collect::<Vec<_>>();
         signatures
             .iter()
-            .find(|signature| self.signature_accepts_arguments(signature, arguments))
+            .find(|signature| self.signature_accepts_arguments(signature, &argument_types))
             .cloned()
             .or_else(|| signatures.into_iter().next())
+            .map(|signature| (signature, argument_types))
     }
 
-    fn signature_accepts_arguments<T: AsRef<str>>(
+    fn signature_accepts_arguments(
         &self,
         signature: &FunctionSignature,
-        arguments: &[T],
+        argument_types: &[String],
     ) -> bool {
-        if arguments.len() > signature.parameters.len() && signature.vararg.is_none() {
+        if argument_types.len() > signature.parameters.len() && signature.vararg.is_none() {
             return false;
         }
-        if arguments.len() < signature.parameters.len()
-            && signature.parameters[arguments.len()..]
+        if argument_types.len() < signature.parameters.len()
+            && signature.parameters[argument_types.len()..]
                 .iter()
                 .any(|parameter| !is_optional_type(parameter, &self.aliases))
         {
             return false;
         }
-        let argument_texts = arguments.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let bindings = generic_bindings(signature, &argument_texts, self);
+        let bindings = generic_bindings_from_types(signature, argument_types, self);
         if !bindings.conflicts.is_empty() {
             return false;
         }
-        arguments
+        argument_types
             .iter()
             .zip(&signature.parameters)
-            .all(|(argument, expected)| {
+            .all(|(actual, expected)| {
                 let mut expected = expected.clone();
                 for generic in &signature.generic_parameters {
                     expected = substitute_type_name(
@@ -919,38 +920,27 @@ impl TypeChecker<'_> {
                         bindings.types.get(generic).map_or("any", String::as_str),
                     );
                 }
-                is_assignable(
-                    &self.infer_expression_type(argument.as_ref()),
-                    &expected,
-                    &self.aliases,
-                    &mut Vec::new(),
-                ) != Some(false)
+                is_assignable(actual, &expected, &self.aliases, &mut Vec::new()) != Some(false)
             })
-            && arguments
+            && argument_types
                 .iter()
                 .skip(signature.parameters.len())
-                .all(|argument| {
+                .all(|actual| {
                     signature.vararg.as_ref().is_some_and(|expected| {
-                        is_assignable(
-                            &self.infer_expression_type(argument.as_ref()),
-                            expected,
-                            &self.aliases,
-                            &mut Vec::new(),
-                        ) != Some(false)
+                        is_assignable(actual, expected, &self.aliases, &mut Vec::new())
+                            != Some(false)
                     })
                 })
     }
 
     fn infer_ast_expression_type(&self, expression: &Expression) -> String {
+        self.infer_expression_node(expression, true)
+    }
+
+    fn infer_expression_node(&self, expression: &Expression, original: bool) -> String {
         let previous = self.position.get();
         let _position = PositionGuard(&self.position, previous);
-        if let (Some(start), Some(end)) = (expression.start_position(), expression.end_position())
-            && self
-                .prepared
-                .text
-                .get(start.bytes()..end.bytes())
-                .is_some_and(|text| text.trim() == expression.to_string().trim())
-        {
+        if original && let Some(start) = expression.start_position() {
             self.position.set(start.bytes());
         }
 
@@ -961,15 +951,15 @@ impl TypeChecker<'_> {
                 collector.functions["<anonymous>"].type_name()
             }
             Expression::IfExpression(value) => {
-                let mut types = vec![self.infer_ast_expression_type(value.if_expression())];
+                let mut types = vec![self.infer_expression_node(value.if_expression(), original)];
                 if let Some(else_ifs) = value.else_if_expressions() {
                     types.extend(
-                        else_ifs
-                            .iter()
-                            .map(|branch| self.infer_ast_expression_type(branch.expression())),
+                        else_ifs.iter().map(|branch| {
+                            self.infer_expression_node(branch.expression(), original)
+                        }),
                     );
                 }
-                types.push(self.infer_ast_expression_type(value.else_expression()));
+                types.push(self.infer_expression_node(value.else_expression(), original));
                 if types.iter().any(|ty| ty == "any") {
                     return "any".to_owned();
                 }
@@ -992,8 +982,8 @@ impl TypeChecker<'_> {
                     return "boolean".to_owned();
                 }
                 if matches!(operator.trim(), "+" | "-" | "*" | "/" | "//" | "%" | "^") {
-                    let left = self.infer_ast_expression_type(lhs);
-                    let right = self.infer_ast_expression_type(rhs);
+                    let left = self.infer_expression_node(lhs, original);
+                    let right = self.infer_expression_node(rhs, original);
                     if matches!(left.as_str(), "integer" | "number")
                         && matches!(right.as_str(), "integer" | "number")
                     {
@@ -1001,8 +991,8 @@ impl TypeChecker<'_> {
                     }
                 }
                 if operator.trim() == ".." {
-                    let left = self.primitive_kind(&self.infer_ast_expression_type(lhs));
-                    let right = self.primitive_kind(&self.infer_ast_expression_type(rhs));
+                    let left = self.primitive_kind(&self.infer_expression_node(lhs, original));
+                    let right = self.primitive_kind(&self.infer_expression_node(rhs, original));
                     if matches!(
                         (left, right),
                         (Some("string" | "number"), Some("string" | "number"))
@@ -1012,11 +1002,13 @@ impl TypeChecker<'_> {
                     return "any".to_owned();
                 }
                 if matches!(operator.trim(), "and" | "or") {
-                    let left = self.infer_ast_expression_type(lhs);
-                    let right = self.infer_ast_expression_type(rhs);
-                    if binop.token().start_position().is_some_and(|position| {
-                        self.prepared.coalesce_operators.contains(&position.bytes())
-                    }) {
+                    let left = self.infer_expression_node(lhs, original);
+                    let right = self.infer_expression_node(rhs, original);
+                    if original
+                        && binop.token().start_position().is_some_and(|position| {
+                            self.prepared.coalesce_operators.contains(&position.bytes())
+                        })
+                    {
                         let (left, optional) = resolve_optional_base_type(&left, &self.aliases);
                         if !optional {
                             return left;
@@ -1051,14 +1043,14 @@ impl TypeChecker<'_> {
                 "any".to_owned()
             }
             Expression::Parentheses { expression, .. } => {
-                self.infer_ast_expression_type(expression)
+                self.infer_expression_node(expression, original)
             }
             Expression::UnaryOperator { unop, expression } => match unop.to_string().trim() {
                 "not" => "boolean".to_owned(),
                 "#" => "number".to_owned(),
                 "-" | "~"
                     if matches!(
-                        self.infer_ast_expression_type(expression).as_str(),
+                        self.infer_expression_node(expression, original).as_str(),
                         "integer" | "number"
                     ) =>
                 {
@@ -1066,7 +1058,7 @@ impl TypeChecker<'_> {
                 }
                 _ => "any".to_owned(),
             },
-            _ => self.infer_expression_type(&expression.to_string()),
+            _ => self.infer_expression_text(&expression.to_string(), false),
         }
     }
 
@@ -1906,7 +1898,7 @@ impl Visitor for TypeChecker<'_> {
             ));
             return;
         }
-        let Some(signature) = signature else {
+        let Some((signature, argument_types)) = signature else {
             let value_type = self.infer_expression_type(name);
             if value_type != "any" && value_type != "function" {
                 let byte = node
@@ -1923,7 +1915,6 @@ impl Visitor for TypeChecker<'_> {
             }
             return;
         };
-        let argument_texts = args.iter().map(String::as_str).collect::<Vec<_>>();
         let mut expanded_args = Vec::new();
         let mut has_unknown_argument_count = false;
         for (index, argument) in args.iter().enumerate() {
@@ -1955,7 +1946,7 @@ impl Visitor for TypeChecker<'_> {
                 expanded_args.push(("nil".to_owned(), "nil".to_owned(), 0));
             }
         }
-        let bindings = generic_bindings(&signature, &argument_texts, self);
+        let bindings = generic_bindings_from_types(&signature, &argument_types, self);
         for (index, ((actual, actual_type, argument_offset), expected)) in
             expanded_args.iter().zip(&signature.parameters).enumerate()
         {
@@ -2604,19 +2595,18 @@ fn is_identifier(value: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_alphanumeric())
 }
 
-fn generic_bindings(
+fn generic_bindings_from_types(
     signature: &FunctionSignature,
-    arguments: &[&str],
+    actual_types: &[String],
     checker: &TypeChecker<'_>,
 ) -> GenericBindings {
     let mut bindings = GenericBindings::default();
-    for (expected, argument) in signature.parameters.iter().zip(arguments) {
-        let actual = checker.infer_expression_type(argument);
+    for (expected, actual) in signature.parameters.iter().zip(actual_types) {
         let expected =
             resolve_alias_chain(expected, &checker.aliases).unwrap_or_else(|| expected.clone());
         bind_generic_type(
             &expected,
-            &actual,
+            actual,
             &signature.generic_parameters,
             &mut bindings.types,
             &mut bindings.conflicts,
@@ -2714,11 +2704,11 @@ fn generic_type_parts(value: &str) -> Option<(&str, Vec<&str>)> {
 
 fn infer_generic_return(
     signature: &FunctionSignature,
-    arguments: &[&str],
+    argument_types: &[String],
     checker: &TypeChecker<'_>,
 ) -> String {
     let mut returns = signature.returns.clone();
-    let bindings = generic_bindings(signature, arguments, checker);
+    let bindings = generic_bindings_from_types(signature, argument_types, checker);
     for parameter in &signature.generic_parameters {
         returns.fixed = returns
             .fixed
