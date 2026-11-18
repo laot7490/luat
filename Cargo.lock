@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "luat"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "full_moon",
  "glob",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "luat-lsp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "luat",
  "serde_json",
