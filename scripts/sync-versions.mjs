@@ -53,7 +53,7 @@ export async function checkVersions(directory = root, product = 'cli') {
   for (const { name, value } of files) {
     const metadata = name.endsWith('package-lock.json') ? value.packages[''] : value;
     if (value.version !== version || metadata.version !== version || metadata.license !== license
-      || Object.values(value.optionalDependencies ?? {}).some(v => v !== version)) throw new Error(`Version/license mismatch in ${name}; run sync:versions:${product}`);
+      || Object.values(value.optionalDependencies ?? {}).some(v => v !== version)) throw new Error(`Version/license mismatch in ${name}; run npm run versions:sync -- ${product}`);
   }
   return version;
 }

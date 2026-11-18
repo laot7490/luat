@@ -14,13 +14,13 @@ CLI versions come from Cargo.toml and use tags such as `v0.1.6`. Language Server
 Run these from the repository root:
 
 ```powershell
-npm run prepare:cli:patch
-npm run prepare:lsp:patch
+npm run version:prepare -- patch cli
+npm run version:prepare -- patch lsp
 ```
 
-Use `major` or `minor` instead of `patch` when appropriate. Each command synchronizes only that product's package metadata and runs offline Cargo checks to update Cargo.lock. Existing `prepare:major/minor/patch` commands remain CLI aliases.
+Use `major` or `minor` instead of `patch` when appropriate. Each command synchronizes only that product's package metadata and runs offline Cargo checks to update Cargo.lock.
 
-`npm run sync:versions:cli` and `npm run sync:versions:lsp` synchronize metadata without increasing versions. Release jobs check consistency and fail rather than silently changing committed versions.
+`npm run versions:sync -- cli` and `npm run versions:sync -- lsp` synchronize metadata without increasing versions. Release jobs check consistency and fail rather than silently changing committed versions.
 
 A compiler fix reaches editor users only when an LSP release is also prepared, because the server embeds the library at its tagged source commit.
 

@@ -2,21 +2,13 @@
 	"name": "luat-workspace",
 	"private": true,
 	"scripts": {
-		"test": "cargo test --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings",
-		"build": "npm run cli:build && npm run lsp:build",
-		"cli:build": "cargo install --path . --force",
+		"check": "cargo test --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings",
+		"test": "npm run check",
+		"fmt": "cargo fmt --all --check",
+		"cli:install": "cargo install --path . --force",
+		"cli:build": "cargo build -p luat",
 		"lsp:build": "node scripts/build-lsp.mjs",
-		"prepare:major": "npm run prepare:cli:major && npm run prepare:lsp:major",
-		"prepare:minor": "npm run prepare:cli:minor && npm run prepare:lsp:minor",
-		"prepare:patch": "npm run prepare:cli:patch && npm run prepare:lsp:patch",
-		"sync:versions": "npm run sync:versions:cli && npm run sync:versions:lsp",
-		"sync:versions:cli": "node scripts/sync-versions.mjs cli",
-		"sync:versions:lsp": "node scripts/sync-versions.mjs lsp",
-		"prepare:cli:major": "node scripts/prepare-version.mjs major cli",
-		"prepare:cli:minor": "node scripts/prepare-version.mjs minor cli",
-		"prepare:cli:patch": "node scripts/prepare-version.mjs patch cli",
-		"prepare:lsp:major": "node scripts/prepare-version.mjs major lsp",
-		"prepare:lsp:minor": "node scripts/prepare-version.mjs minor lsp",
-		"prepare:lsp:patch": "node scripts/prepare-version.mjs patch lsp"
+		"version:sync": "node scripts/sync-versions.mjs",
+		"version:prepare": "node scripts/prepare-version.mjs"
 	}
 }
