@@ -676,7 +676,7 @@ async function generate({ sourceRoot, outputRoot }) {
 		}
 		const manifest = [
 			"# Definition sources",
-            ...readFileSync(path.join(ROOT, "lsp/definitions/LUA-SOURCE.md"), "utf8").split("\n"),
+            ...readFileSync(path.join(ROOT, "src/definitions/LUA-SOURCE.md"), "utf8").split("\n"),
             "## FiveM definitions",
 			"",
 			`- Repository: https://github.com/${SOURCE_REPOSITORY}`,
@@ -713,7 +713,7 @@ if (isMain) {
 	const sourceIndex = process.argv.indexOf("--source");
 	const outputIndex = process.argv.indexOf("--output");
 	const sourceRoot = sourceIndex >= 0 ? path.resolve(process.argv[sourceIndex + 1]) : undefined;
-	const outputRoot = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.join(ROOT, "lsp", "definitions");
+	const outputRoot = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.join(ROOT, "src", "definitions");
 	generate({ sourceRoot, outputRoot })
 		.then((report) => {
 			process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
