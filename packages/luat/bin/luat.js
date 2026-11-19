@@ -2,6 +2,7 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const { version } = require('../package.json');
 
 const packages = {
   'win32-x64': 'luat-win32-x64',
@@ -15,14 +16,17 @@ function reportError(message) {
   const args = process.argv.slice(2);
   const plain = args.some((arg, index) => arg === '--pretty' && args[index + 1] === 'false');
   const color = process.stderr.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && !plain;
-  console.error(message.replace('error:', color ? '\x1b[31merror:\x1b[0m' : 'error:'));
+  const tag = `luat v${version}`;
+  console.error(color
+    ? `\x1b[1;38;2;157;130;241m${tag}\x1b[0m \x1b[31m${message}\x1b[0m`
+    : `${tag} ${message}`);
 }
 
 function launch() {
   const key = `${process.platform}-${process.arch}`;
   const binaryPackage = packages[key];
   if (!binaryPackage) {
-    reportError(`\nerror: LuaT has no binary for ${key}.`);
+    reportError(`LuaT has no binary for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -31,7 +35,7 @@ function launch() {
   try {
     binary = require.resolve(binaryPackage);
   } catch {
-    reportError(`\nerror: LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
+    reportError(`LuaT binary package '${binaryPackage}' is missing. Reinstall luat for ${key}.`);
     process.exitCode = 2;
     return;
   }
@@ -47,7 +51,7 @@ function launch() {
   child.once('error', (error) => {
     spawnFailed = true;
     process.exitCode = 2;
-    reportError(`\nerror: Could not start the LuaT compiler: ${error.message}`);
+    reportError(`Could not start the LuaT compiler: ${error.message}`);
   });
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.once(signal, () => child.kill(signal));

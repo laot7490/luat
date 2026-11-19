@@ -35,7 +35,7 @@ export async function packageLsp(root, platform, binary, output) {
   const executable = `luat-lsp${platform.startsWith('win32') ? '.exe' : ''}`;
   await copyFile(binary, path.join(server, executable));
   if (!platform.startsWith('win32')) await chmod(path.join(server, executable), 0o755);
-  for (const name of definitions) await copyFile(path.join(root, 'lsp/definitions', name), path.join(server, 'definitions', name));
+  for (const name of definitions) await copyFile(path.join(root, 'src/definitions', name), path.join(server, 'definitions', name));
   await mkdir(output, { recursive: true });
   const vsix = path.join(output, `luat-vscode-${platform}.vsix`);
   await vsce.createVSIX({ cwd: stage, target: platform, packagePath: vsix, useYarn: false, dependencies: false });
