@@ -1,40 +1,5 @@
 use super::*;
-
-fn declaration_sources(
-    path: &Path,
-    source: &str,
-    overlays: &BTreeMap<PathBuf, Arc<str>>,
-) -> Vec<crate::compiler::declarations::DeclarationSource> {
-    let mut texts = BTreeMap::new();
-    if let Some(parent) = path.parent() {
-        if let Ok(entries) = fs::read_dir(parent) {
-            for entry in entries.flatten() {
-                let sibling = entry.path();
-                if sibling.to_string_lossy().ends_with(".d.luat")
-                    && let Ok(text) = fs::read_to_string(&sibling)
-                {
-                    texts.insert(sibling, text);
-                }
-            }
-        }
-        for (file, text) in overlays {
-            if file.parent() == Some(parent) && file.to_string_lossy().ends_with(".d.luat") {
-                texts.insert(file.clone(), text.to_string());
-            }
-        }
-    }
-    texts.insert(path.to_path_buf(), source.to_owned());
-    texts
-        .into_iter()
-        .map(
-            |(path, text)| crate::compiler::declarations::DeclarationSource {
-                path: Some(path),
-                context: None,
-                text,
-            },
-        )
-        .collect()
-}
+use crate::ExecutionContext;
 
 /// Owns the latest editor buffers used to create analysis snapshots.
 #[derive(Clone, Default)]
@@ -286,16 +251,16 @@ impl AnalysisHost {
                 .and_then(|snapshot| snapshot.files.get(path))
                 .filter(|old| Arc::ptr_eq(&old.parsed, &file.parsed));
             let declaration = path.to_string_lossy().ends_with(".d.luat");
-            let siblings_changed = declaration
-                && self.dirty_paths.iter().any(|changed| {
-                    changed.parent() == path.parent()
-                        && changed.to_string_lossy().ends_with(".d.luat")
-                });
-            let errors = if declaration && (old.is_none() || siblings_changed) {
-                DeclarationSet::from_sources(declaration_sources(path, &file.source, &self.files))
-                    .err()
-                    .filter(|(error_path, _)| error_path.as_ref().is_none_or(|p| p == path))
-                    .map_or_else(|| file.diagnostics.clone(), |(_, error)| error.diagnostics)
+            let errors = if declaration
+                && (old.is_none() || self.dirty_paths.iter().any(|path| is_configuration(path)))
+            {
+                DeclarationSet::from_sources([crate::compiler::declarations::DeclarationSource {
+                    path: Some(path.clone()),
+                    context: None,
+                    text: file.source.to_string(),
+                }])
+                .err()
+                .map_or_else(|| file.diagnostics.clone(), |(_, error)| error.diagnostics)
             } else if let Some(old) = old {
                 old.diagnostics.clone()
             } else if self.roots.get(path).is_some_and(|root| root.is_some()) {
@@ -486,7 +451,7 @@ impl AnalysisHost {
                                         true,
                                     ))
                                 });
-                            diagnostics.insert(path.clone(), file.diagnostics.clone());
+                            diagnostics.insert(path.clone(), Vec::new());
                             files.insert(path.clone(), file);
                         }
                     }
@@ -594,6 +559,19 @@ impl AnalysisHost {
                             }
                             if !bindings.is_empty() {
                                 project_imports.insert(path, bindings);
+                            }
+                        }
+                    }
+                    if let Some(declarations) = &declarations {
+                        for file in &declarations.files {
+                            if let Some(path) = &file.path {
+                                let sides = match file.context {
+                                    Some(side) => vec![side],
+                                    None => {
+                                        vec![ExecutionContext::Client, ExecutionContext::Server]
+                                    }
+                                };
+                                contexts.insert(path.clone(), sides);
                             }
                         }
                     }

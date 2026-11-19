@@ -1280,13 +1280,9 @@ mod tests {
         ] {
             let dir = install.join(name).join("1.0.0");
             fs::create_dir_all(dir.join("types")).unwrap();
-            fs::write(
-                dir.join("types/api.d.luat"),
-                "---@shared\ntypedef Api = number\n",
-            )
-            .unwrap();
+            fs::write(dir.join("types/api.d.luat"), "typedef Api = number\n").unwrap();
             let manifest = format!(
-                "name='{name}'\nversion='1.0.0'\nauthor='Test'\nlicense='MIT'\ndeclarations=['types/api.d.luat']\n[dependencies]\n{}",
+                "name='{name}'\nversion='1.0.0'\nauthor='Test'\nlicense='MIT'\nshared=['types/api.d.luat']\n[dependencies]\n{}",
                 deps.iter()
                     .map(|d| format!("{d}='1.0.0'\n"))
                     .collect::<String>()
@@ -1299,10 +1295,7 @@ mod tests {
                     commit: "0".repeat(40),
                     files: BTreeMap::from([
                         ("luat-package.toml".into(), sha256(manifest.as_bytes())),
-                        (
-                            "types/api.d.luat".into(),
-                            sha256(b"---@shared\ntypedef Api = number\n"),
-                        ),
+                        ("types/api.d.luat".into(), sha256(b"typedef Api = number\n")),
                     ]),
                 },
             );
@@ -1657,16 +1650,16 @@ mod tests {
         let root = temp_project();
         let package = root.join(".luat/packages/example/1.0.0");
         fs::create_dir_all(package.join("nested")).unwrap();
-        let declaration = "---@shared\ndeclare PackageValue: { value: string }\n";
+        let declaration = "typedef ValueType = number\ndeclare PackageValue: { value: string }\n";
         fs::write(package.join("nested/shared.d.luat"), declaration).unwrap();
-        let manifest = "name='example'\nversion='1.0.0'\nauthor='Test'\nlicense='MIT'\ndeclarations=['nested/shared.d.luat']\n";
+        let manifest = "name='example'\nversion='1.0.0'\nauthor='Test'\nlicense='MIT'\nshared=['nested/shared.d.luat']\n";
         fs::write(package.join("luat-package.toml"), manifest).unwrap();
-        fs::write(
-            root.join("src/client/main.luat"),
-            "local value: string = PackageValue.value",
-        )
-        .unwrap();
-        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[dependencies]\nexample='1.0.0'\n[fivem]\nclient=['src/client/main.luat']\n").unwrap();
+        let entry = root.join("src/client/main.luat");
+        let source = "local value: ValueType = PackageValue.value";
+        fs::write(&entry, source).unwrap();
+        let local_declaration = root.join("src/local.d.luat");
+        fs::write(&local_declaration, "typedef ValueType = string").unwrap();
+        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[dependencies]\nexample='1.0.0'\n[fivem]\nclient=['src/local.d.luat', 'src/client/main.luat']\n").unwrap();
         fs::write(root.join(".gitignore"), "dist/\n").unwrap();
         fs::create_dir_all(root.join(".luat")).unwrap();
         fs::write(root.join(".luat/.gitignore"), "*\n").unwrap();
@@ -1702,6 +1695,22 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join(".gitignore")).unwrap(),
             "dist/\n"
+        );
+        let mut host = crate::analysis::AnalysisHost::new();
+        host.set_file(entry.clone(), source.to_owned());
+        let snapshot = host.snapshot();
+        assert!(snapshot.diagnostics(&entry).unwrap().is_empty());
+        let offset = source.find("ValueType").unwrap();
+        assert_eq!(
+            snapshot.definition(&entry, offset).unwrap().path,
+            local_declaration
+        );
+        assert!(
+            snapshot
+                .hover(&entry, offset)
+                .unwrap()
+                .contents
+                .contains("string")
         );
         fs::remove_dir_all(root).unwrap();
     }

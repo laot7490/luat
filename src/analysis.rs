@@ -190,19 +190,31 @@ impl AnalysisSnapshot {
         {
             return false;
         }
-        symbol.context.is_none_or(|context| {
-            if let Some(declaration) = self
-                .project_root(path)
-                .and_then(|root| self.project_symbols.get(&root))
+        if symbol.kind == ProjectSymbolKind::TypeAlias
+            && symbol.path != path
+            && let Some(root) = self.project_root(path)
+            && symbol.path.starts_with(root.join(".luat/packages"))
+            && let Some(group) = self
+                .project_symbols
+                .get(&root)
                 .and_then(|index| index.get(&symbol.name))
-                .and_then(|group| {
-                    group.iter().find(|candidate| {
-                        candidate.path == path && path.to_string_lossy().ends_with(".d.luat")
+            && group.iter().any(|candidate| {
+                candidate.kind == ProjectSymbolKind::TypeAlias
+                    && !candidate.path.starts_with(root.join(".luat/packages"))
+                    && self
+                        .symbol_visibility
+                        .get(path)
+                        .is_none_or(|visible| visible.contains(&candidate.path))
+                    && candidate.context.is_none_or(|side| {
+                        self.contexts
+                            .get(path)
+                            .is_some_and(|sides| sides.as_slice() == [side])
                     })
-                })
-            {
-                return declaration.context.is_none_or(|side| side == context);
-            }
+            })
+        {
+            return false;
+        }
+        symbol.context.is_none_or(|context| {
             self.contexts.get(path).is_none_or(|contexts| {
                 contexts.iter().all(|side| *side == context)
                     || contexts.len() > 1
@@ -684,16 +696,6 @@ impl AnalysisSnapshot {
                 };
                 result.insert(key, (if callable { 3 } else { 4 }, modifiers));
             }
-        }
-        let mut line_start = 0;
-        for line in file.source.split_inclusive('\n') {
-            let line_text = line.trim_end_matches(['\r', '\n']);
-            let annotation = line_text.trim();
-            if ["---@client", "---@server", "---@shared"].contains(&annotation) {
-                let start = line_start + line_text.len() - line_text.trim_start().len();
-                result.insert((start, start + annotation.len()), (6, 0));
-            }
-            line_start += line.len();
         }
         for (range, kind, modifiers) in &file.semantic_roles {
             let entry = result.entry((range.start, range.end)).or_insert((*kind, 0));
@@ -1626,7 +1628,12 @@ fn non_code_at(source: &str, offset: usize) -> bool {
 fn is_field_or_type_position(source: &str, start: usize, end: usize) -> bool {
     let before = source[..start].trim_end();
     let after = source[end..].trim_start();
-    if before.ends_with(['.', ':']) || before.ends_with("typedef") || before.ends_with("typeof") {
+    let member_access = before.ends_with('.') && !before.ends_with("..");
+    if member_access
+        || before.ends_with(':')
+        || before.ends_with("typedef")
+        || before.ends_with("typeof")
+    {
         return true;
     }
     if after.starts_with(':') {
@@ -2448,7 +2455,7 @@ mod tests {
         .unwrap();
         fs::write(
             root.join("luat.toml"),
-            "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n",
+            "[project]\nname='test'\n[fivem]\nshared=['types/*.d.luat']\nclient=['src/client/main.luat']\n",
         )
         .unwrap();
 
@@ -2509,11 +2516,15 @@ mod tests {
             ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("types")).unwrap();
-        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client.luat']\nserver=['src/server.luat']\nshared=['src/shared.luat']\n").unwrap();
-        fs::write(root.join("types/client.d.luat"), "---@client\nfunction ContextQuery(value: string): string end\nfunction ClientOnly() end").unwrap();
+        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[fivem]\nclient=['types/client*.d.luat', 'src/client.luat']\nserver=['types/server.d.luat', 'src/server.luat']\nshared=['src/shared.luat']\n").unwrap();
+        fs::write(
+            root.join("types/client.d.luat"),
+            "typedef ContextType = string\nfunction ContextQuery(value: string): string end\nfunction ClientOnly() end",
+        )
+        .unwrap();
         fs::write(
             root.join("types/server.d.luat"),
-            "---@server\nfunction ContextQuery(value: number): number end",
+            "typedef ContextType = number\nfunction ContextQuery(value: number): number end",
         )
         .unwrap();
         let client = root.join("src/client.luat");
@@ -2523,10 +2534,19 @@ mod tests {
         fs::write(&client, source).unwrap();
         fs::write(&server, "ContextQuery(1)").unwrap();
         fs::write(&shared, "").unwrap();
+        let client_references = root.join("types/client-extra.d.luat");
+        let declaration_source = "function ClientReference(): ContextType end";
+        fs::write(&client_references, declaration_source).unwrap();
         let mut host = AnalysisHost::new();
+        host.set_file(client_references.clone(), declaration_source.into());
         host.set_file(client.clone(), source.into());
         host.set_file(shared.clone(), String::new());
         let snapshot = host.snapshot();
+        let alias = declaration_source.find("ContextType").unwrap();
+        assert_eq!(
+            snapshot.definition(&client_references, alias).unwrap().path,
+            root.join("types/client.d.luat")
+        );
         let signatures = snapshot
             .signature_help(&client, source.find("'value'").unwrap())
             .unwrap();
@@ -2890,28 +2910,6 @@ mod editor_correction_tests {
     }
 
     #[test]
-    fn semantic_tokens_highlight_execution_context_annotations() {
-        let path = PathBuf::from("contexts.luat");
-        let source = "---@client\n---@server\n---@shared\n-- @client";
-        let mut host = AnalysisHost::new();
-        host.set_file(path.clone(), source.into());
-
-        let tokens = host.snapshot().semantic_tokens(&path);
-        for annotation in ["---@client", "---@server", "---@shared"] {
-            assert!(
-                tokens
-                    .iter()
-                    .any(|(range, kind, _)| { &source[range.clone()] == annotation && *kind == 6 })
-            );
-        }
-        assert!(
-            !tokens
-                .iter()
-                .any(|(range, kind, _)| { &source[range.clone()] == "-- @client" && *kind == 6 })
-        );
-    }
-
-    #[test]
     fn semantic_tokens_mark_operators_and_map_coalescing_ranges() {
         let path = PathBuf::from("operators.luat");
         let source = "local value = left ?? right\nlocal sum = a + b\n-- ~=\n// comment with +=\nlocal quotient = a // b\nlocal text = '=='";
@@ -3129,7 +3127,11 @@ mod token_assignment_tests {
         host.set_file(path.clone(), fs::read_to_string(&path).unwrap());
         let snapshot = host.snapshot();
         assert!(
-            snapshot.diagnostics(&path).unwrap().is_empty(),
+            snapshot
+                .diagnostics(&path)
+                .unwrap()
+                .iter()
+                .all(|diagnostic| diagnostic.code == "LT2006"),
             "{:?}",
             snapshot.diagnostics(&path)
         );

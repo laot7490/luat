@@ -80,6 +80,7 @@ pub(crate) struct DeclarationFile {
     pub(crate) source: String,
     pub(crate) prepared: PreparedSource,
     pub(crate) ast: full_moon::ast::Ast,
+    pub(super) project: bool,
     pub(crate) context: Option<ExecutionContext>,
 }
 
@@ -95,12 +96,15 @@ pub(crate) struct DeclarationSet {
 
 impl DeclarationSet {
     pub(crate) fn from_texts(sources: &[String]) -> Result<Self, CompileError> {
-        Self::from_sources_inner(
-            sources.iter().map(|text| DeclarationSource {
-                path: None,
-                context: None,
-                text: text.clone(),
-            }),
+        Self::from_ranked_sources(
+            sources
+                .iter()
+                .map(|text| DeclarationSource {
+                    path: None,
+                    context: None,
+                    text: text.clone(),
+                })
+                .map(|source| (source, false)),
             false,
         )
         .map_err(|(_, error)| error)
@@ -109,33 +113,19 @@ impl DeclarationSet {
     pub(crate) fn from_sources(
         sources: impl IntoIterator<Item = DeclarationSource>,
     ) -> Result<Self, (Option<PathBuf>, CompileError)> {
-        Self::from_sources_inner(sources, true)
+        Self::from_ranked_sources(sources.into_iter().map(|source| (source, false)), true)
     }
 
-    fn from_sources_inner(
-        sources: impl IntoIterator<Item = DeclarationSource>,
+    pub(crate) fn from_ranked_sources(
+        sources: impl IntoIterator<Item = (DeclarationSource, bool)>,
         validate_declarations: bool,
     ) -> Result<Self, (Option<PathBuf>, CompileError)> {
         let mut set = Self::default();
-        for source in sources {
-            let annotation =
-                declaration_context(&source.text).map_err(|error| (source.path.clone(), error))?;
-            if annotation.is_some() && source.context.is_some() && annotation != source.context {
-                return Err((
-                    source.path,
-                    CompileError {
-                        diagnostics: vec![Diagnostic::at(
-                            &source.text,
-                            0,
-                            1,
-                            "LT2011",
-                            "Declaration context conflicts with its built-in execution context."
-                                .to_owned(),
-                        )],
-                    },
-                ));
-            }
-            let context = annotation.or(source.context);
+        let mut project_aliases = HashMap::new();
+        let mut project_scoped_aliases: HashMap<ExecutionContext, HashMap<String, TypeAlias>> =
+            HashMap::new();
+        for (source, project) in sources {
+            let context = source.context;
             let (prepared, ast, globals) = parse_declaration_file(&source.text)
                 .map_err(|error| (source.path.clone(), error))?;
             let mut aliases = AliasCollector::default();
@@ -195,11 +185,15 @@ impl DeclarationSet {
                 }
             }
 
+            let (shared_aliases, scoped_aliases) = if project {
+                (&mut project_aliases, &mut project_scoped_aliases)
+            } else {
+                (&mut set.aliases, &mut set.scoped_aliases)
+            };
             for (name, alias) in aliases.aliases {
                 if let Some(context) = context {
-                    let shared = set.aliases.get(&name);
-                    let scoped = set
-                        .scoped_aliases
+                    let shared = shared_aliases.get(&name);
+                    let scoped = scoped_aliases
                         .get(&context)
                         .and_then(|aliases| aliases.get(&name));
                     if [shared, scoped].into_iter().flatten().any(|previous| {
@@ -221,12 +215,12 @@ impl DeclarationSet {
                             },
                         ));
                     }
-                    set.scoped_aliases
+                    scoped_aliases
                         .entry(context)
                         .or_default()
                         .insert(name, alias);
                 } else {
-                    if set.aliases.get(&name).is_some_and(|previous| {
+                    if shared_aliases.get(&name).is_some_and(|previous| {
                         previous.parameters != alias.parameters
                             || previous.definition != alias.definition
                     }) {
@@ -245,8 +239,7 @@ impl DeclarationSet {
                             },
                         ));
                     }
-                    if set
-                        .scoped_aliases
+                    if scoped_aliases
                         .values()
                         .filter_map(|aliases| aliases.get(&name))
                         .any(|previous| {
@@ -269,7 +262,7 @@ impl DeclarationSet {
                             },
                         ));
                     }
-                    set.aliases.insert(name, alias);
+                    shared_aliases.insert(name, alias);
                 }
             }
             for mut global in globals {
@@ -349,10 +342,24 @@ impl DeclarationSet {
                 prepared,
                 ast,
                 context,
+                project,
             });
         }
         if validate_declarations {
-            super::typecheck::validate_declaration_types(&set)?;
+            super::typecheck::validate_declaration_types(&set, false)?;
+        }
+        for aliases in set.scoped_aliases.values_mut() {
+            aliases.retain(|name, _| !project_aliases.contains_key(name));
+        }
+        set.aliases.extend(project_aliases);
+        for (context, aliases) in project_scoped_aliases {
+            set.scoped_aliases
+                .entry(context)
+                .or_default()
+                .extend(aliases);
+        }
+        if validate_declarations && set.files.iter().any(|file| file.project) {
+            super::typecheck::validate_declaration_types(&set, true)?;
         }
         Ok(set)
     }
@@ -469,68 +476,6 @@ pub(crate) fn parse_declaration_file(
     Ok((prepared, ast, globals))
 }
 
-fn declaration_context(source: &str) -> Result<Option<ExecutionContext>, CompileError> {
-    let version = LuaVersion::cfxlua().with_luau();
-    let tokens = match Lexer::new(source, version).collect() {
-        LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
-        LexerResult::Fatal(_) => Vec::new(),
-    };
-    let mut first_code = None;
-    let mut directives = Vec::new();
-    for token in tokens {
-        let start = token.start_position().bytes();
-        let end = token.end_position().bytes();
-        let line = source.get(start..end).unwrap_or_default();
-        let comment = matches!(
-            token.token_type(),
-            TokenType::SingleLineComment { .. }
-                | TokenType::MultiLineComment { .. }
-                | TokenType::CStyleComment { .. }
-        );
-        if matches!(token.token_type(), TokenType::SingleLineComment { .. })
-            && ["---@client", "---@server", "---@shared"]
-                .iter()
-                .any(|tag| line.trim() == *tag)
-        {
-            let context = match line.trim() {
-                "---@client" => Some(ExecutionContext::Client),
-                "---@server" => Some(ExecutionContext::Server),
-                _ => None,
-            };
-            directives.push((start, line.trim().to_owned(), context));
-        } else if !comment && !line.trim().is_empty() && first_code.is_none() {
-            first_code = Some(start);
-        }
-    }
-    if directives.len() > 1 {
-        let (offset, tag, _) = &directives[1];
-        return Err(CompileError {
-            diagnostics: vec![Diagnostic::at(
-                source,
-                *offset,
-                tag.len(),
-                "LT2011",
-                "A declaration file may have only one execution context tag.".to_owned(),
-            )],
-        });
-    }
-    let Some((offset, tag, context)) = directives.into_iter().next() else {
-        return Ok(None);
-    };
-    if first_code.is_some_and(|first| offset > first) {
-        return Err(CompileError {
-            diagnostics: vec![Diagnostic::at(
-                source,
-                offset,
-                tag.len(),
-                "LT2011",
-                "Execution context tags must appear before declarations.".to_owned(),
-            )],
-        });
-    }
-    Ok(context)
-}
-
 fn executable_declaration_error(
     source: &str,
     prepared: &PreparedSource,
@@ -570,65 +515,18 @@ mod tests {
     use std::{fs, time::SystemTime};
 
     #[test]
-    fn reads_file_level_context_tags_only_from_comments() {
+    fn declaration_context_comes_from_the_manifest() {
         let declarations = DeclarationSet::from_sources([DeclarationSource {
             path: None,
-            context: None,
-            text: "---@server\ntypedef Api = number\nfunction query(): Api end".to_owned(),
+            context: Some(crate::ExecutionContext::Server),
+            text: "---@client\ntypedef Api = number\nfunction query(): Api end".to_owned(),
         }])
         .unwrap();
         assert_eq!(
             declarations.files[0].context,
             Some(crate::ExecutionContext::Server)
         );
-        assert!(
-            declarations
-                .scoped_aliases
-                .contains_key(&crate::ExecutionContext::Server)
-        );
-
-        let error = DeclarationSet::from_sources([DeclarationSource {
-            path: None,
-            context: None,
-            text: "typedef Api = number\n---@client\nfunction query(): Api end".to_owned(),
-        }])
-        .err()
-        .expect("tag after declarations should fail");
-        assert_eq!(error.1.diagnostics[0].code, "LT2011");
-    }
-
-    #[test]
-    fn conflicting_context_tags_are_rejected() {
-        let error = DeclarationSet::from_sources([DeclarationSource {
-            path: None,
-            context: None,
-            text: "---@client\n---@server\nfunction query(): number end".to_owned(),
-        }])
-        .err()
-        .expect("duplicate context tags should fail");
-        assert_eq!(error.1.diagnostics[0].code, "LT2011");
-    }
-
-    #[test]
-    fn context_tags_allow_leading_whitespace_and_conflicts_ignore_file_order() {
-        assert!(
-            DeclarationSet::from_sources([DeclarationSource {
-                path: None,
-                context: None,
-                text: "\n--- Description\n\n---@client\ndeclare Value: number".into()
-            }])
-            .is_ok()
-        );
-        for texts in [
-            ["---@client\ndeclare Value: string", "declare Value: number"],
-            [
-                "---@client\ndeclare Value: string",
-                "---@client\nfunction Value() end",
-            ],
-            ["declare Value: number", "---@client\ndeclare Value: string"],
-        ] {
-            assert!(DeclarationSet::from_texts(&texts.map(str::to_owned)).is_err());
-        }
+        assert!(declarations.scoped_aliases[&crate::ExecutionContext::Server].contains_key("Api"));
     }
 
     fn check_project(declaration: &str, source: &str) -> Result<(), Vec<Diagnostic>> {
@@ -646,7 +544,7 @@ mod tests {
         fs::write(root.join("src/main.luat"), source).unwrap();
         fs::write(
             root.join("luat.toml"),
-            "[project]\nname='test'\n[compiler]\ndeclarations=['types/api.d.luat']\n[fivem]\nshared=['src/main.luat']\n",
+            "[project]\nname='test'\n[fivem]\nshared=['types/api.d.luat', 'src/main.luat']\n",
         )
         .unwrap();
 

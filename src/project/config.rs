@@ -26,14 +26,12 @@ pub struct ProjectMetadata {
 #[serde(default, deny_unknown_fields)]
 pub struct CompilerConfig {
     pub out_dir: PathBuf,
-    pub declarations: Vec<PathBuf>,
 }
 
 impl Default for CompilerConfig {
     fn default() -> Self {
         Self {
             out_dir: default_out_dir(),
-            declarations: Vec::new(),
         }
     }
 }

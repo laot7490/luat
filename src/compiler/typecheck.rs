@@ -3021,6 +3021,7 @@ pub(crate) fn check_with_imports(
 
 pub(super) fn validate_declaration_types(
     declarations: &DeclarationSet,
+    project: bool,
 ) -> Result<(), (Option<PathBuf>, crate::CompileError)> {
     let mut aliases = AliasCollector::default();
     aliases.aliases.insert(
@@ -3053,11 +3054,9 @@ pub(super) fn validate_declaration_types(
         let alias_graph = unguarded_alias_graph(&context_aliases);
         let cycles = find_alias_cycles(&alias_graph);
         let deep_aliases = find_deep_aliases(&alias_graph);
-        for file in declarations
-            .files
-            .iter()
-            .filter(|file| file.context.is_none() || file.context == Some(context))
-        {
+        for file in declarations.files.iter().filter(|file| {
+            file.project == project && (file.context.is_none() || file.context == Some(context))
+        }) {
             let mut validator = TypeReferenceValidator {
                 source: &file.source,
                 prepared: &file.prepared,

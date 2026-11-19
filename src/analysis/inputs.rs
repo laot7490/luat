@@ -191,7 +191,7 @@ mod tests {
         let root = project("install-refresh");
         let main = root.join("src/client/main.luat");
         let declaration = root.join("api.d.luat");
-        fs::write(root.join("luat.toml"), "[project]\nname='refresh'\n[compiler]\ndeclarations=['api.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n").unwrap();
+        fs::write(root.join("luat.toml"), "[project]\nname='refresh'\n[fivem]\nshared=['api.d.luat']\nclient=['src/client/main.luat']\n").unwrap();
         fs::write(&declaration, "declare Value: number").unwrap();
         let source = "local count: number = Value";
         fs::write(&main, source).unwrap();
@@ -206,6 +206,36 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|error| error.code == "LT2001")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unlisted_declaration_siblings_are_hidden_until_matched_by_the_manifest() {
+        let root = project("declaration-scope");
+        let entry = root.join("src/client/main.luat");
+        let declaration = root.join("api.d.luat");
+        let sibling = root.join("extra.d.luat");
+        let cfg = root.join("luat.toml");
+        fs::write(&declaration, "typedef Id = Extra").unwrap();
+        fs::write(&sibling, "typedef Extra = number").unwrap();
+        fs::write(&entry, "").unwrap();
+        let mut host = AnalysisHost::new();
+        host.set_file(declaration.clone(), "typedef Id = Extra".into());
+        assert!(
+            host.snapshot()
+                .diagnostics(&declaration)
+                .unwrap()
+                .iter()
+                .any(|error| error.message.contains("Unknown type 'Extra'"))
+        );
+        fs::write(&cfg, "[project]\nname='refresh'\n[fivem]\nshared=['*.d.luat']\nclient=['src/client/main.luat']\n").unwrap();
+        host.invalidate_file(&cfg);
+        assert!(
+            host.snapshot()
+                .diagnostics(&declaration)
+                .unwrap()
+                .is_empty()
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -250,11 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn sibling_declaration_changes_revalidate_unchanged_documents() {
+    fn configured_declaration_changes_revalidate_unchanged_documents() {
         let root = project("sibling-declarations");
         fs::write(root.join("src/client/main.luat"), "print(1)").unwrap();
         let first = root.join("a.d.luat");
         let sibling = root.join("b.d.luat");
+        fs::write(root.join("luat.toml"), "[project]\nname='cache-test'\n[fivem]\nshared=['*.d.luat']\nclient=['src/client/*.luat']\n").unwrap();
+        fs::write(&first, "typedef Derived = Base").unwrap();
+        fs::write(&sibling, "typedef Base = number").unwrap();
         let mut host = AnalysisHost::new();
         host.set_file(first.clone(), "typedef Derived = Base".into());
         host.set_file(sibling.clone(), "typedef Base = number".into());

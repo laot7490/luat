@@ -46,6 +46,7 @@ impl Project {
             manifest: String::new(),
             warnings: vec![],
             declarations: vec![],
+            declaration_sides: HashMap::new(),
             sources: vec![],
             package_sources: HashMap::new(),
             package_declaration_roots: HashMap::new(),
@@ -69,19 +70,22 @@ impl Project {
                 })?;
             self.package_manifests
                 .insert(package.root.clone(), package.manifest.clone());
-            for path in &classified[0] {
-                self.package_declaration_roots
-                    .insert(path.clone(), package.root.clone());
-                if !self.declarations.contains(path) {
-                    self.declarations.push(path.clone());
-                    self.sources.push(SourceFile {
-                        input: path.clone(),
-                        output: None,
-                    });
-                }
-            }
-            for (side, paths) in classified[1..].iter().enumerate() {
+            for (side, paths) in classified.iter().enumerate() {
                 for path in paths {
+                    if path.to_string_lossy().ends_with(".d.luat") {
+                        self.package_declaration_roots
+                            .insert(path.clone(), package.root.clone());
+                        let sides = self.declaration_sides.entry(path.clone()).or_insert(0);
+                        if *sides == 0 {
+                            self.declarations.push(path.clone());
+                            self.sources.push(SourceFile {
+                                input: path.clone(),
+                                output: None,
+                            });
+                        }
+                        *sides |= 1 << side;
+                        continue;
+                    }
                     if let Some(source) = self.package_sources.get_mut(path) {
                         source.sides |= 1 << side;
                         continue;
@@ -227,7 +231,7 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("src/client/main.luat"), "").unwrap();
-        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n").unwrap();
+        fs::write(root.join("luat.toml"), "[project]\nname='test'\n[fivem]\nshared=['types/*.d.luat']\nclient=['src/client/main.luat']\n").unwrap();
         Project::load(root).unwrap()
     }
 
@@ -236,16 +240,27 @@ mod tests {
         name: &str,
         declarations: &str,
         runtime: bool,
+        declaration_side: &str,
         dependencies: &[&str],
     ) -> PathBuf {
         let root = project.root.join(".luat/packages").join(name).join("1.0.0");
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("api.d.luat"), declarations).unwrap();
         let manifest: PackageManifest = toml::from_str(&format!(
-            "name='{name}'\nversion='1.0.0'\nauthor='test'\nlicense='MIT'\ndeclarations=['api.d.luat']\n{}\n[dependencies]\n{}",
-            if runtime { "shared=['init.luat']" } else { "" },
-            dependencies.iter().map(|name| format!("{name}='1.0.0'\n")).collect::<String>()
-        )).unwrap();
+            "name='{name}'\nversion='1.0.0'\nauthor='test'\nlicense='MIT'\n{}\n[dependencies]\n{}",
+            if runtime && declaration_side == "shared" {
+                "shared=['init.luat', 'api.d.luat']".to_owned()
+            } else if runtime {
+                format!("shared=['init.luat']\n{declaration_side}=['api.d.luat']")
+            } else {
+                format!("{declaration_side}=['api.d.luat']")
+            },
+            dependencies
+                .iter()
+                .map(|name| format!("{name}='1.0.0'\n"))
+                .collect::<String>()
+        ))
+        .unwrap();
         if runtime {
             fs::write(root.join("init.luat"), "return {}").unwrap();
         }
@@ -266,13 +281,15 @@ mod tests {
             "ambient",
             "typedef SharedId = number",
             false,
+            "shared",
             &[],
         );
         attach(
             &mut project,
             "runtime",
-            "---@client\ntypedef ClientRecord = { id: SharedId }",
+            "typedef ClientRecord = { id: SharedId }",
             true,
+            "client",
             &["ambient"],
         );
         let path = project.root.join("src/client/main.luat");
@@ -297,14 +314,59 @@ mod tests {
     }
 
     #[test]
+    fn file_and_project_aliases_override_package_aliases() {
+        let mut project = project();
+        let entry = project.root.join("src/client/main.luat");
+        fs::write(&entry, "local mod = import('./override')\nlocal projectValue: ConsumerOnly = true\nlocal moduleValue: string = mod.value").unwrap();
+        let module = project.root.join("src/client/override.luat");
+        fs::write(&module, "typedef ConsumerOnly = string\nlocal value: ConsumerOnly = 'file'\nreturn { value = value }").unwrap();
+        project = Project::load(&project.root).unwrap();
+        let package = attach(
+            &mut project,
+            "ambient",
+            "typedef ConsumerOnly = number",
+            false,
+            "client",
+            &[],
+        );
+        project.check_current().unwrap();
+        project.build_current().unwrap();
+        let package_types = project
+            .read_declarations_for(Some(&package.join("api.d.luat")), &HashMap::new())
+            .unwrap();
+        assert_eq!(
+            package_types.scoped_aliases[&crate::ExecutionContext::Client]["ConsumerOnly"]
+                .definition,
+            "number"
+        );
+        fs::write(&entry, "local value: ConsumerOnly = 1").unwrap();
+        assert!(
+            project
+                .check_current()
+                .unwrap_err()
+                .to_string()
+                .contains("LT2001")
+        );
+        fs::remove_dir_all(project.root).unwrap();
+    }
+
+    #[test]
     fn package_declarations_follow_dependency_chain_without_consumer_or_sibling_types() {
         let mut project = project();
-        attach(&mut project, "base", "typedef BaseId = number", false, &[]);
+        attach(
+            &mut project,
+            "base",
+            "typedef BaseId = number",
+            false,
+            "shared",
+            &[],
+        );
         attach(
             &mut project,
             "api",
             "typedef ApiId = BaseId",
             false,
+            "shared",
             &["base"],
         );
         attach(
@@ -312,6 +374,7 @@ mod tests {
             "sibling",
             "typedef SiblingOnly = string",
             false,
+            "shared",
             &[],
         );
         let root = attach(
@@ -319,6 +382,7 @@ mod tests {
             "runtime",
             "typedef OwnId = ApiId",
             true,
+            "shared",
             &["api"],
         );
         let declarations = project
@@ -346,6 +410,7 @@ mod tests {
             "first",
             "typedef Duplicate = number",
             false,
+            "shared",
             &[],
         );
         attach(
@@ -353,6 +418,7 @@ mod tests {
             "second",
             "typedef Duplicate = string",
             true,
+            "shared",
             &[],
         );
         assert!(
@@ -374,6 +440,7 @@ mod tests {
             "sibling",
             "typedef SiblingOnly = number",
             false,
+            "shared",
             &[],
         );
         attach(
@@ -381,6 +448,7 @@ mod tests {
             "api",
             "typedef OwnId = SiblingOnly",
             false,
+            "shared",
             &[],
         );
         assert!(
@@ -397,12 +465,20 @@ mod tests {
     #[test]
     fn emitted_package_modules_are_escrow_ignored_with_custom_output_directory() {
         let mut project = project();
-        let base = attach(&mut project, "base", "typedef BaseId = number", true, &[]);
+        let base = attach(
+            &mut project,
+            "base",
+            "typedef BaseId = number",
+            true,
+            "shared",
+            &[],
+        );
         let api = attach(
             &mut project,
             "api",
             "typedef ApiId = number",
             true,
+            "shared",
             &["base"],
         );
         attach(
@@ -410,6 +486,7 @@ mod tests {
             "unused",
             "typedef UnusedId = number",
             true,
+            "shared",
             &[],
         );
         fs::write(base.join("init.luat"), "return { value = 1 }").unwrap();

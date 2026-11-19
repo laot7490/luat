@@ -17,7 +17,7 @@ use std::{
 use crate::compiler::declarations::{DeclarationSet, DeclarationSource};
 use crate::{CompileError, Diagnostic};
 
-type DeclarationInputs = Vec<(PathBuf, String)>;
+type DeclarationInputs = Vec<(PathBuf, u8, bool, String)>;
 pub(crate) type ScopedDeclarations = HashMap<DeclarationInputs, std::sync::Arc<DeclarationSet>>;
 type Outputs = Vec<(PathBuf, String)>;
 type CompiledFiles = HashMap<PathBuf, (PathBuf, String)>;
@@ -86,6 +86,7 @@ pub struct Project {
     manifest: String,
     warnings: Vec<String>,
     declarations: Vec<PathBuf>,
+    declaration_sides: HashMap<PathBuf, u8>,
     sources: Vec<SourceFile>,
     package_sources: HashMap<PathBuf, packages::PackageSource>,
     package_declaration_roots: HashMap<PathBuf, PathBuf>,
@@ -260,62 +261,24 @@ impl Project {
         }
         let mut sources = Vec::new();
         let mut outputs = HashSet::new();
-        let mut declaration_paths = HashSet::new();
-
-        for pattern in &config.compiler.declarations {
-            validate_project_path(pattern, &config_path)?;
-            let absolute_pattern = root.join(pattern);
-            let pattern = absolute_pattern.to_string_lossy().replace('\\', "/");
-            let mut matches = glob::glob(&pattern)
-                .map_err(|error| BuildError::Configuration {
+        manifest::validate_manifest_paths(&config.fivem, &root, &config_path)?;
+        let mut declaration_sides = HashMap::new();
+        let fivem = &config.fivem;
+        for (side, entries) in [&fivem.shared, &fivem.client, &fivem.server]
+            .into_iter()
+            .enumerate()
+        {
+            let paths = manifest::expanded_paths(entries, &root, false).map_err(|message| {
+                BuildError::Configuration {
                     path: config_path.clone(),
-                    message: error.to_string(),
-                })?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| BuildError::Configuration {
-                    path: config_path.clone(),
-                    message: error.to_string(),
-                })?;
-            matches.sort();
-            let matched = !matches.is_empty();
-            for path in matches {
-                let canonical_root = fs::canonicalize(&root).map_err(|source| BuildError::Io {
-                    path: root.clone(),
-                    source,
-                })?;
-                let canonical_path = fs::canonicalize(&path).map_err(|source| BuildError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-                reject_symlink_path(&root, &path, &config_path)?;
-                if !canonical_path.starts_with(&canonical_root) {
-                    return Err(BuildError::Configuration {
-                        path: config_path.clone(),
-                        message: format!(
-                            "declaration path resolves outside the project: {}",
-                            path.display()
-                        ),
-                    });
+                    message,
                 }
-                if !path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
-                {
-                    return Err(BuildError::Configuration {
-                        path: config_path.clone(),
-                        message: format!(
-                            "declaration files must use the .d.luat extension: {}",
-                            path.display()
-                        ),
-                    });
-                }
-                declaration_paths.insert(path);
-            }
-            if !matched {
-                return Err(BuildError::Configuration {
-                    path: config_path.clone(),
-                    message: format!("declaration pattern matched no files: {}", pattern),
-                });
+            })?;
+            for path in paths
+                .into_iter()
+                .filter(|path| manifest::is_declaration_path(path))
+            {
+                *declaration_sides.entry(root.join(path)).or_insert(0) |= 1 << side;
             }
         }
         let mut runtime_paths = Vec::new();
@@ -344,7 +307,7 @@ impl Project {
                 output: Some(output),
             });
         }
-        let mut declarations = declaration_paths.into_iter().collect::<Vec<_>>();
+        let mut declarations = declaration_sides.keys().cloned().collect::<Vec<_>>();
         declarations.sort();
         for path in &declarations {
             sources.push(SourceFile {
@@ -352,7 +315,6 @@ impl Project {
                 output: None,
             });
         }
-        manifest::validate_manifest_paths(&config.fivem, &root, &config_path)?;
         let output_dir = root.join(&config.compiler.out_dir);
         let manifest_path = root.join("fxmanifest.lua");
         reject_symlink_path(&root, &manifest_path, &config_path)?;
@@ -438,6 +400,7 @@ impl Project {
             manifest,
             warnings,
             declarations,
+            declaration_sides,
             sources,
             package_sources: HashMap::new(),
             package_declaration_roots: HashMap::new(),

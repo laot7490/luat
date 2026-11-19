@@ -17,8 +17,6 @@ pub(crate) struct PackageManifest {
     pub description: String,
     pub license: String,
     #[serde(default)]
-    pub declarations: Vec<String>,
-    #[serde(default)]
     pub shared: Vec<String>,
     #[serde(default)]
     pub client: Vec<String>,
@@ -37,13 +35,7 @@ impl PackageManifest {
         }
         Version::parse(&self.version).map_err(|e| e.to_string())?;
         validate_dependencies(&self.dependencies)?;
-        for p in self
-            .declarations
-            .iter()
-            .chain(&self.shared)
-            .chain(&self.client)
-            .chain(&self.server)
-        {
+        for p in self.shared.iter().chain(&self.client).chain(&self.server) {
             if p.is_empty()
                 || p.contains(['\\', ':'])
                 || p.starts_with('/')
@@ -548,16 +540,13 @@ fn scan(
 pub(crate) fn classified_files(
     root: &Path,
     m: &PackageManifest,
-) -> Result<[Vec<PathBuf>; 4], String> {
+) -> Result<[Vec<PathBuf>; 3], String> {
     m.validate()?;
     let mut sources = BTreeMap::new();
     scan(root, root, &[], &mut sources)?;
-    let mut out: [Vec<PathBuf>; 4] = Default::default();
+    let mut out: [Vec<PathBuf>; 3] = Default::default();
     let mut assigned = BTreeSet::new();
-    for (side, patterns) in [&m.declarations, &m.shared, &m.client, &m.server]
-        .into_iter()
-        .enumerate()
-    {
+    for (side, patterns) in [&m.shared, &m.client, &m.server].into_iter().enumerate() {
         for p in patterns {
             let g = glob::Pattern::new(p).map_err(|e| e.to_string())?;
             let mut matched = false;
@@ -566,15 +555,10 @@ pub(crate) fn classified_files(
                     continue;
                 }
                 matched = true;
-                if rel.ends_with(".d.luat") != (side == 0) {
-                    return Err(format!(
-                        "'{rel}' has invalid declaration/runtime classification"
-                    ));
-                }
                 if out[side].contains(path) {
                     continue;
                 }
-                if !assigned.insert(rel.clone()) {
+                if !assigned.insert(rel.clone()) && !rel.ends_with(".d.luat") {
                     return Err(format!("'{rel}' is classified in multiple contexts"));
                 }
                 out[side].push(path.clone());

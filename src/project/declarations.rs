@@ -105,13 +105,18 @@ impl Project {
                         path: path.clone(),
                         source,
                     })?;
-                Ok((path.clone(), text))
+                Ok((
+                    path.clone(),
+                    self.declaration_sides[path],
+                    !self.package_declaration_roots.contains_key(path),
+                    text,
+                ))
             })
             .collect()
     }
 
     fn parse_declarations(&self, inputs: &DeclarationInputs) -> Result<DeclarationSet, BuildError> {
-        let mut sources = vec![
+        let builtins = vec![
             DeclarationSource {
                 path: None,
                 context: Some(crate::ExecutionContext::Client),
@@ -143,14 +148,29 @@ impl Project {
                 text: crate::definitions::RUNTIME_SERVER.to_owned(),
             },
         ];
-        sources.extend(inputs.iter().map(|(path, text)| DeclarationSource {
-            path: Some(path.clone()),
-            context: None,
-            text: text.clone(),
-        }));
-        DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
-            path: path.unwrap_or_else(|| self.config_path.clone()),
-            error,
+        let sources = builtins
+            .into_iter()
+            .map(|source| (source, false))
+            .chain(inputs.iter().map(|(path, sides, project, text)| {
+                let context = match sides {
+                    2 => Some(crate::ExecutionContext::Client),
+                    4 => Some(crate::ExecutionContext::Server),
+                    _ => None,
+                };
+                (
+                    DeclarationSource {
+                        path: Some(path.clone()),
+                        context,
+                        text: text.clone(),
+                    },
+                    *project,
+                )
+            }));
+        DeclarationSet::from_ranked_sources(sources, true).map_err(|(path, error)| {
+            BuildError::Compile {
+                path: path.unwrap_or_else(|| self.config_path.clone()),
+                error,
+            }
         })
     }
 }
