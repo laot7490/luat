@@ -57,16 +57,13 @@ pub(crate) struct DeclarationLocation {
 pub(crate) struct DeclaredFunction {
     pub(super) signature: FunctionSignature,
     pub(crate) context: Option<ExecutionContext>,
-    #[allow(dead_code)]
     pub(crate) documentation: String,
-    #[allow(dead_code)]
     pub(crate) location: DeclarationLocation,
 }
 
 pub(crate) struct DeclaredGlobal {
     pub(crate) name: String,
     pub(crate) type_name: String,
-    #[allow(dead_code)]
     pub(crate) documentation: String,
     pub(crate) location: DeclarationLocation,
     pub(crate) context: Option<ExecutionContext>,
@@ -776,7 +773,7 @@ mod tests {
 
     #[test]
     fn validates_generated_fivem_declarations() {
-        let root = std::env::current_dir().unwrap().join("lsp/definitions");
+        let root = std::env::current_dir().unwrap().join("src/definitions");
         let sources = [
             ("fivem-client.d.luat", Some(crate::ExecutionContext::Client)),
             ("fivem-server.d.luat", Some(crate::ExecutionContext::Server)),

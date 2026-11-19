@@ -427,7 +427,7 @@ fn expand_templates(source: &str) -> (String, Vec<usize>) {
         }
         if source[i..].starts_with("--") {
             let comment_start = i + 2;
-            i = long_bracket_end(source, comment_start).unwrap_or_else(|| {
+            i = long_bracket_end(source, comment_start, Some(source.len())).unwrap_or_else(|| {
                 source[comment_start..]
                     .find('\n')
                     .map_or(source.len(), |offset| comment_start + offset)
@@ -438,7 +438,7 @@ fn expand_templates(source: &str) -> (String, Vec<usize>) {
             i = c_style_comment_end(source, i);
             continue;
         }
-        if let Some(end) = long_bracket_end(source, i) {
+        if let Some(end) = long_bracket_end(source, i, Some(source.len())) {
             i = end;
             continue;
         }
@@ -480,7 +480,11 @@ fn quoted_end(s: &str, start: usize, q: u8) -> usize {
     s.len()
 }
 
-fn long_bracket_end(source: &str, start: usize) -> Option<usize> {
+pub(crate) fn long_bracket_end(
+    source: &str,
+    start: usize,
+    unterminated_end: Option<usize>,
+) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes.get(start) != Some(&b'[') {
         return None;
@@ -493,11 +497,10 @@ fn long_bracket_end(source: &str, start: usize) -> Option<usize> {
         return None;
     }
     let closing = format!("]{}]", "=".repeat(cursor - start - 1));
-    Some(
-        source[cursor + 1..]
-            .find(&closing)
-            .map_or(source.len(), |offset| cursor + 1 + offset + closing.len()),
-    )
+    source[cursor + 1..]
+        .find(&closing)
+        .map(|offset| cursor + 1 + offset + closing.len())
+        .or(unterminated_end)
 }
 
 fn c_style_comment_end(source: &str, start: usize) -> usize {
@@ -622,7 +625,7 @@ fn find_interpolation_end(s: &str, start: usize) -> Option<usize> {
         }
         if s[i..].starts_with("--") {
             let comment_start = i + 2;
-            i = long_bracket_end(s, comment_start).unwrap_or_else(|| {
+            i = long_bracket_end(s, comment_start, Some(s.len())).unwrap_or_else(|| {
                 s[comment_start..]
                     .find('\n')
                     .map_or(s.len(), |offset| comment_start + offset)
@@ -633,7 +636,7 @@ fn find_interpolation_end(s: &str, start: usize) -> Option<usize> {
             i = c_style_comment_end(s, i);
             continue;
         }
-        if let Some(end) = long_bracket_end(s, i) {
+        if let Some(end) = long_bracket_end(s, i, Some(s.len())) {
             i = end;
             continue;
         }
@@ -801,6 +804,19 @@ fn is_question_mark(token: &Token) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_brackets_preserve_unterminated_input_policies() {
+        let closed = "[=[ café ]] ]=]";
+        assert_eq!(super::long_bracket_end(closed, 0, None), Some(closed.len()));
+        let open = "[=[ café ]]";
+        assert_eq!(super::long_bracket_end(open, 0, None), None);
+        assert_eq!(
+            super::long_bracket_end(open, 0, Some(open.len())),
+            Some(open.len())
+        );
+        assert_eq!(super::long_bracket_end("[x", 0, Some(2)), None);
+    }
+
     use super::{expand_templates, invalid_type_alias_error, prepare};
 
     #[test]

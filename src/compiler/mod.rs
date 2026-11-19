@@ -50,6 +50,14 @@ impl ParsedSource {
             .clone()
     }
 
+    pub(crate) fn editor_import_calls(&self) -> Result<Vec<imports::ImportCall>, CompileError> {
+        if self.syntax_valid {
+            self.import_calls()
+        } else {
+            imports::analyze(&self.source, &self.prepared, &self.ast, true)
+        }
+    }
+
     pub(crate) fn contextual_export_type(
         &self,
         imports: &std::collections::HashMap<String, String>,
