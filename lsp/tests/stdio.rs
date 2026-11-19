@@ -51,7 +51,7 @@ fn stdio_editor_assistance_providers_and_markdown() {
             .to_string_lossy()
             .replace('\\', "/")
     );
-    let source = "---[Native Documentation](https://docs.fivem.net/natives/?_0xE7490533)\n---@param value Açıklama\n---@deprecated Use replacement.\nlocal function old(value: number, unused: string) return value end\nlocal count = 1\nold(2, 'x')\nold(2, 'x')";
+    let source = "---[Native Documentation](https://docs.fivem.net/natives/?_0xE7490533)\n---@param value Açıklama\n---@deprecated Use replacement.\nlocal function old(value: number, unused: string) return value end\nlocal count = 1\nold(2, 'x')\nold(2, 'x')\nlocal greeting = `🚀 {count`";
     send_message(
         &mut input,
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"luat","version":1,"text":source}}}),
@@ -106,6 +106,17 @@ fn stdio_editor_assistance_providers_and_markdown() {
             assert_eq!(old["tags"], json!([1]));
         }
     }
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","id":9,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":uri}}}),
+    );
+    let tokens = receive_response(&receiver, 9);
+    assert!(
+        tokens["result"]["data"]
+            .as_array()
+            .is_some_and(|data| !data.is_empty()),
+        "{tokens}"
+    );
     send_message(
         &mut input,
         json!({"jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{"settings":{"luat":{"diagnostics":{"unusedParameters":false,"unusedLocals":false},"inlayHints":{"parameterNames":{"enabled":false},"variableTypes":{"enabled":false}}}}}}),
@@ -187,6 +198,23 @@ fn stdio_initializes_publishes_diagnostics_completes_and_shuts_down() {
         &mut input,
         json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
     );
+    let lua_uri = uri.replace("/main.luat", "/main.lua");
+    send_message(
+        &mut input,
+        json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":lua_uri,"languageId":"luat","version":1,"text":"local value: number = 'bad'\nprint(value)"}}
+        }),
+    );
+    send_message(
+        &mut input,
+        json!({
+            "jsonrpc":"2.0","id":90,"method":"textDocument/completion",
+            "params":{"textDocument":{"uri":lua_uri},"position":{"line":1,"character":11}}
+        }),
+    );
+    assert!(receive_response(&receiver, 90)["result"].is_null());
+
     send_message(
         &mut input,
         json!({

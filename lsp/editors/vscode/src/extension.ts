@@ -16,7 +16,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const watcher = vscode.workspace.createFileSystemWatcher("**/{*.luat,*.lua,luat.toml,luat-package.toml,luat.lock}");
 	const managedTypesWatcher = vscode.workspace.createFileSystemWatcher("**/.luat/**");
 	const clientOptions: LanguageClientOptions = {
-		documentSelector: [{ scheme: "file", language: "luat" }, { scheme: "file", language: "lua" }],
+		documentSelector: [{ scheme: "file", language: "luat", pattern: "**/*.luat" }],
 		synchronize: { fileEvents: [watcher, managedTypesWatcher], configurationSection: "luat" },
         initializationOptions: vscode.workspace.getConfiguration("luat"),
 		outputChannel: output,

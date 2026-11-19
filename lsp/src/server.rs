@@ -411,6 +411,9 @@ impl LanguageServer for Backend {
         let Some(path) = document.uri.to_file_path().map(PathBuf::from) else {
             return;
         };
+        if path.extension().is_none_or(|extension| extension != "luat") {
+            return;
+        }
         self.set_document(document.uri, path, document.text, document.version)
             .await;
     }

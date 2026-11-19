@@ -82,6 +82,25 @@ suite('LuaT extension host', () => {
 		assert.ok(edit.entries().some(([uri, edits]) => uri.toString() === mainDocument.uri.toString() && edits.length === 2));
 	});
 
+	test('serves declarations and leaves Lua documents outside LuaT', async () => {
+		const lua = path.join(workspace!, 'plain.lua');
+		const declaration = path.join(workspace!, 'types.d.luat');
+		await fs.writeFile(lua, 'local __luat = 1\nprint(__luat)\n');
+		await fs.writeFile(declaration, 'typedef ExampleId = number\n');
+		const luaDocument = await vscode.workspace.openTextDocument(lua);
+		const declarationDocument = await vscode.workspace.openTextDocument(declaration);
+		assert.equal(declarationDocument.languageId, 'luat');
+		const tokens = await vscode.commands.executeCommand<vscode.SemanticTokens>(
+			'vscode.provideDocumentSemanticTokens', declarationDocument.uri,
+		);
+		assert.ok(tokens && tokens.data.length > 0);
+		const luaTokens = await vscode.commands.executeCommand<vscode.SemanticTokens | undefined>(
+			'vscode.provideDocumentSemanticTokens', luaDocument.uri,
+		);
+		assert.ok(!luaTokens || luaTokens.data.length === 0);
+		assert.ok(!vscode.languages.getDiagnostics(luaDocument.uri).some(item => item.source === 'luat'));
+	});
+
 	test('completes runtime members and renders documented function signatures', async () => {
 		const runtimeFile = path.join(workspace!, 'runtime.luat');
 		await fs.writeFile(runtimeFile, '');
