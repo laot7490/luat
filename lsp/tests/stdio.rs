@@ -594,3 +594,116 @@ fn read_message(input: &mut impl BufRead) -> std::io::Result<Value> {
     input.read_exact(&mut body)?;
     Ok(serde_json::from_slice(&body).unwrap())
 }
+
+#[test]
+fn import_members_survive_diagnostics_for_an_unfinished_member() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target/tests")
+        .join(format!("import-completion-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src/client")).unwrap();
+    std::fs::create_dir_all(root.join("src/shared")).unwrap();
+    let main = root.join("src/client/main.luat");
+    let module = root.join("src/shared/config.luat");
+    let source = "const cfg = import('@/shared/config.luat')\nprint(cfg.)";
+    std::fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='completion'\n[fivem]\nclient=['src/client/*.luat']",
+    )
+    .unwrap();
+    std::fs::write(&main, source).unwrap();
+    std::fs::write(&module, "return { selam = true, random = 15 }").unwrap();
+    let uri_for = |path: &std::path::Path| {
+        tower_lsp_server::ls_types::Uri::from_file_path(path)
+            .unwrap()
+            .as_str()
+            .to_owned()
+    };
+    let uri = uri_for(&main);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_luat-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = BufReader::new(stdout);
+        while let Ok(message) = read_message(&mut output) {
+            if sender.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}),
+    );
+    receive_response(&receiver, 1);
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    );
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"luat","version":1,"text":source}}}),
+    );
+    let mut published = false;
+    for id in [2, 3] {
+        while id == 3 && !published {
+            let message = receive(&receiver);
+            published = message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["version"] == 1;
+        }
+        send_message(
+            &mut input,
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":10},"context":{"triggerKind":2,"triggerCharacter":"."}}}),
+        );
+        loop {
+            let result = receive(&receiver);
+            if result["method"] == "textDocument/publishDiagnostics"
+                && result["params"]["version"] == 1
+            {
+                published = true;
+            }
+            if result["id"] == id {
+                assert!(
+                    result["result"].as_array().is_some_and(|items| items
+                        .iter()
+                        .any(|item| item["label"] == "random" && item["detail"] == "number")),
+                    "{result}"
+                );
+                break;
+            }
+        }
+    }
+    let complete = source.replace("cfg.", "cfg.random");
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":complete}]}}),
+    );
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","id":4,"method":"textDocument/definition","params":{"textDocument":{"uri":uri},"position":{"line":1,"character":12}}}),
+    );
+    let location = receive_response(&receiver, 4);
+    assert_eq!(location["result"]["uri"], uri_for(&module), "{location}");
+    assert_eq!(
+        location["result"]["range"]["start"],
+        json!({"line":0,"character":23})
+    );
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown","params":null}),
+    );
+    receive_response(&receiver, 5);
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(root).unwrap();
+}
