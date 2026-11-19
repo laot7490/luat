@@ -1,13 +1,17 @@
 use std::{
-    env,
+    collections::BTreeMap,
+    env, fs,
     io::IsTerminal,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::mpsc,
     time::Duration,
 };
 
-use luat::{OutputChange, Project, output};
-use notify::{Event, EventKind, RecursiveMode, Watcher};
+use luat::{OutputChange, Project, ProjectConfig, output};
+use notify::{
+    Event, EventKind, RecursiveMode, Watcher,
+    event::{ModifyKind, RenameMode},
+};
 
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
@@ -65,17 +69,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
         notify::Config::default().with_follow_symlinks(false),
     )
     .map_err(|error| (2, format!("error LT5401: Could not start watcher: {error}")))?;
-    watcher
-        .watch(&folder, RecursiveMode::Recursive)
-        .map_err(|error| {
-            (
-                2,
-                format!(
-                    "error LT5401: Could not watch {}: {error}",
-                    folder.display()
-                ),
-            )
-        })?;
+    let mut watched = BTreeMap::new();
+    sync_watches(
+        &mut watcher,
+        &mut watched,
+        watch_paths(&folder, &config),
+        &[],
+    )?;
     let path = super::render::display_path(&folder, None);
     let color = output::color_enabled(std::io::stdout().is_terminal());
     let path = super::render::paint(&path, super::render::Color::Muted, color);
@@ -91,15 +91,31 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
 
     loop {
         match receiver.recv() {
-            Ok(Ok(event)) if relevant(&event, &src, &config, &declarations) => {
+            Ok(Ok(event)) => {
+                if !process_event(
+                    &event,
+                    &src,
+                    &config,
+                    &declarations,
+                    &mut watcher,
+                    &mut watched,
+                )? {
+                    continue;
+                }
                 let mut changed = true;
                 while changed {
                     changed = false;
                     match receiver.recv_timeout(DEBOUNCE) {
-                        Ok(Ok(next)) if relevant(&next, &src, &config, &declarations) => {
-                            changed = true
+                        Ok(Ok(next)) => {
+                            changed = process_event(
+                                &next,
+                                &src,
+                                &config,
+                                &declarations,
+                                &mut watcher,
+                                &mut watched,
+                            )?;
                         }
-                        Ok(Ok(_)) => {}
                         Ok(Err(error)) => {
                             return Err((2, format!("error LT5401: Filesystem watcher: {error}")));
                         }
@@ -124,7 +140,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                     declarations = project.declaration_files().to_vec();
                 }
             }
-            Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 return Err((2, format!("error LT5401: Filesystem watcher: {error}")));
             }
@@ -263,13 +278,179 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, bool), (u8, String)> {
     Ok((folder.unwrap_or_else(|| PathBuf::from(".")), pretty))
 }
 
-fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) -> bool {
-    let structural = matches!(
+fn watch_paths(root: &Path, config: &Path) -> BTreeMap<PathBuf, RecursiveMode> {
+    let mut paths = BTreeMap::from([(root.to_path_buf(), RecursiveMode::NonRecursive)]);
+    for directory in [root.join("src"), root.join(".luat")] {
+        if real_directory(&directory) {
+            paths.insert(directory, RecursiveMode::Recursive);
+        }
+    }
+    if let Some(config) = fs::read_to_string(config)
+        .ok()
+        .and_then(|text| toml::from_str::<ProjectConfig>(&text).ok())
+    {
+        for path in config
+            .fivem
+            .shared
+            .iter()
+            .chain(&config.fivem.client)
+            .chain(&config.fivem.server)
+        {
+            if path.starts_with('@') || path.contains("://") {
+                continue;
+            }
+            let directories = Path::new(path).parent().unwrap_or(Path::new(""));
+            let components = directories
+                .components()
+                .filter(|part| *part != Component::CurDir)
+                .map(|part| match part {
+                    Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(components) = components {
+                add_script_watches(root, &components, &mut paths);
+            }
+        }
+    }
+    let mut recursive = Vec::<PathBuf>::new();
+    paths.retain(|path, mode| {
+        if recursive.iter().any(|parent| path.starts_with(parent)) {
+            return false;
+        }
+        if *mode == RecursiveMode::Recursive {
+            recursive.push(path.clone());
+        }
+        true
+    });
+    paths
+}
+
+fn real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn add_script_watches(
+    path: &Path,
+    components: &[&str],
+    paths: &mut BTreeMap<PathBuf, RecursiveMode>,
+) {
+    if paths.get(path) == Some(&RecursiveMode::Recursive) || !real_directory(path) {
+        return;
+    }
+    paths.insert(path.to_path_buf(), RecursiveMode::NonRecursive);
+    let Some((&component, remaining)) = components.split_first() else {
+        return;
+    };
+    if component == "**" {
+        paths.insert(path.to_path_buf(), RecursiveMode::Recursive);
+    } else if component.contains(['*', '?', '[']) {
+        if let Ok(pattern) = glob::Pattern::new(component)
+            && let Ok(entries) = fs::read_dir(path)
+        {
+            for entry in entries.flatten() {
+                if pattern.matches(&entry.file_name().to_string_lossy()) {
+                    add_script_watches(&entry.path(), remaining, paths);
+                }
+            }
+        }
+    } else {
+        add_script_watches(&path.join(component), remaining, paths);
+    }
+}
+
+fn sync_watches(
+    watcher: &mut impl Watcher,
+    watched: &mut BTreeMap<PathBuf, RecursiveMode>,
+    next: BTreeMap<PathBuf, RecursiveMode>,
+    removed: &[PathBuf],
+) -> Result<(), (u8, String)> {
+    let needs_rewatch = |path: &Path| removed.iter().any(|old_path| path.starts_with(old_path));
+    for (path, mode) in watched.iter() {
+        if next.get(path) != Some(mode) || needs_rewatch(path) {
+            watcher
+                .unwatch(path)
+                .or_else(|error| {
+                    if matches!(error.kind, notify::ErrorKind::WatchNotFound) {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| {
+                    (
+                        2,
+                        format!(
+                            "error LT5401: Could not stop watching {}: {error}",
+                            path.display()
+                        ),
+                    )
+                })?;
+        }
+    }
+    for (path, mode) in &next {
+        if watched.get(path) != Some(mode) || needs_rewatch(path) {
+            watcher.watch(path, *mode).map_err(|error| {
+                (
+                    2,
+                    format!("error LT5401: Could not watch {}: {error}", path.display()),
+                )
+            })?;
+        }
+    }
+    *watched = next;
+    Ok(())
+}
+
+fn process_event(
+    event: &Event,
+    src: &Path,
+    config: &Path,
+    declarations: &[PathBuf],
+    watcher: &mut impl Watcher,
+    watched: &mut BTreeMap<PathBuf, RecursiveMode>,
+) -> Result<bool, (u8, String)> {
+    let mut changed = false;
+    if event.need_rescan()
+        || event.paths.iter().any(|path| {
+            path == config
+                || is_structural(event) && (watched.contains_key(path) || real_directory(path))
+        })
+    {
+        let next = watch_paths(config.parent().unwrap_or(Path::new(".")), config);
+        let removed = match event.kind {
+            EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                event.paths.as_slice()
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                event.paths.get(..1).unwrap_or_default()
+            }
+            _ => &[],
+        };
+        changed = *watched != next
+            || watched
+                .keys()
+                .any(|path| removed.iter().any(|old_path| path.starts_with(old_path)));
+        sync_watches(watcher, watched, next, removed)?;
+    }
+    Ok(changed || relevant(event, src, config, declarations, watched))
+}
+
+fn is_structural(event: &Event) -> bool {
+    matches!(
         event.kind,
-        EventKind::Create(_)
-            | EventKind::Remove(_)
-            | EventKind::Modify(notify::event::ModifyKind::Name(_))
-    );
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    )
+}
+
+fn relevant(
+    event: &Event,
+    src: &Path,
+    config: &Path,
+    declarations: &[PathBuf],
+    watched: &BTreeMap<PathBuf, RecursiveMode>,
+) -> bool {
+    let structural = is_structural(event);
     event.need_rescan()
         || (structural && event.paths.is_empty())
         || event.paths.iter().any(|path| {
@@ -299,32 +480,35 @@ fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) 
                         .extension()
                         .is_some_and(|extension| extension == "luat" || extension == "lua")
                         || structural && path.extension().is_none())
-                || structural && declaration_tree(path)
+                || structural
+                    && (is_declaration(path)
+                        || watched.iter().any(|(root, mode)| {
+                            *mode == RecursiveMode::Recursive
+                                && path.starts_with(root)
+                                && declaration_tree(path)
+                        }))
         })
 }
 
-fn declaration_tree(path: &Path) -> bool {
-    if path
-        .file_name()
+fn is_declaration(path: &Path) -> bool {
+    path.file_name()
         .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
-    {
-        return true;
-    }
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_dir()
-        && std::fs::read_dir(path).is_ok_and(|entries| {
-            entries
-                .flatten()
-                .any(|entry| declaration_tree(&entry.path()))
-        })
+}
+
+fn declaration_tree(path: &Path) -> bool {
+    is_declaration(path)
+        || real_directory(path)
+            && fs::read_dir(path).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| declaration_tree(&entry.path()))
+            })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, time::SystemTime};
+    use std::time::SystemTime;
 
     #[test]
     fn parses_default_and_explicit_folder_with_spaces() {
@@ -364,34 +548,35 @@ mod tests {
     #[test]
     fn filters_events_to_luat_changes_and_structural_directories_under_src() {
         let src = Path::new("project/src");
+        let watched = BTreeMap::new();
         let mut event = Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
             notify::event::DataChange::Any,
         )));
         event.paths.push(src.join("nested/main.luat"));
         let config = Path::new("project/luat.toml");
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         event.paths = vec![PathBuf::from("project/luat.lock")];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         event.paths = vec![src.join("module.lua")];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         event.paths = vec![src.join("nested/readme.txt")];
-        assert!(!relevant(&event, src, config, &[]));
+        assert!(!relevant(&event, src, config, &[], &watched));
         event.kind = EventKind::Create(notify::event::CreateKind::Folder);
         event.paths = vec![src.join("nested")];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         event.paths = vec![PathBuf::from("project/dist/main.lua")];
-        assert!(!relevant(&event, src, config, &[]));
+        assert!(!relevant(&event, src, config, &[], &watched));
         event.paths = vec![config.to_path_buf()];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         let declaration = PathBuf::from("project/types/api.d.luat");
         event.paths = vec![declaration.clone()];
-        assert!(relevant(&event, src, config, &[declaration]));
+        assert!(relevant(&event, src, config, &[declaration], &watched));
         event.paths = vec![PathBuf::from("project/types/new/nested/api.d.luat")];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
         event.paths = vec![PathBuf::from(
             "project/.luat/packages/@types/example/1.0.0/client.d.luat",
         )];
-        assert!(relevant(&event, src, config, &[]));
+        assert!(relevant(&event, src, config, &[], &watched));
     }
 
     #[test]
@@ -407,9 +592,24 @@ mod tests {
         event.paths.push(moved.clone());
         let src = root.join("src");
         let config = root.join("luat.toml");
-        assert!(!relevant(&event, &src, &config, &[]));
+        fs::create_dir_all(root.join("web/node_modules/dependency")).unwrap();
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            &config,
+            "[project]\nname = 'test'\n[fivem]\nshared = ['types/**/*.d.luat']\n",
+        )
+        .unwrap();
+        let watched = watch_paths(&root, &config);
+        assert_eq!(watched[&root], RecursiveMode::NonRecursive);
+        assert_eq!(watched[&root.join("types")], RecursiveMode::Recursive);
+        assert!(
+            !watched
+                .keys()
+                .any(|path| path.starts_with(root.join("web")))
+        );
+        assert!(!relevant(&event, &src, &config, &[], &watched));
         fs::write(moved.join("api.d.luat"), "typedef Api = string").unwrap();
-        assert!(relevant(&event, &src, &config, &[]));
+        assert!(relevant(&event, &src, &config, &[], &watched));
         fs::remove_dir_all(root).unwrap();
     }
 }
