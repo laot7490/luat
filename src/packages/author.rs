@@ -71,14 +71,17 @@ fn init(base: &Path) -> Result<(), (u8, String)> {
         if super::catalog::valid_name(&value) {
             break value;
         }
-        eprintln!("Use lowercase letters, numbers, _ or - in package name.");
+        crate::output::stderr(
+            "ERROR",
+            "Use lowercase letters, numbers, _ or - in package name.",
+        );
     };
     let author = loop {
         let value = ask("Author", None)?;
         if !value.is_empty() {
             break value;
         }
-        eprintln!("Author cannot be empty.");
+        crate::output::stderr("ERROR", "Author cannot be empty.");
     };
     let description = ask("Description", None)?;
     let version = loop {
@@ -86,14 +89,14 @@ fn init(base: &Path) -> Result<(), (u8, String)> {
         if semver::Version::parse(&value).is_ok() {
             break value;
         }
-        eprintln!("Enter a valid semantic version.");
+        crate::output::stderr("ERROR", "Enter a valid semantic version.");
     };
     let license = loop {
         let value = ask("License", Some("MIT"))?;
         if !value.is_empty() {
             break value;
         }
-        eprintln!("License cannot be empty.");
+        crate::output::stderr("ERROR", "License cannot be empty.");
     };
     create(base, &name, &author, &description, &version, &license)
 }
@@ -121,9 +124,8 @@ fn create(
     );
     fs::write(root.join("luat-package.toml"), manifest).map_err(err)?;
     fs::write(root.join("init.luat"), "return {}\n").map_err(err)?;
-    println!(
-        "Success: Created {name}@{version}\nNext: Edit the modules, then run `luat package check`."
-    );
+    crate::output::status("SUCCESS", &format!("Created {name}@{version}"));
+    crate::output::status("INFO", "Edit the modules, then run `luat package check`.");
     Ok(())
 }
 fn err(error: impl std::fmt::Display) -> (u8, String) {

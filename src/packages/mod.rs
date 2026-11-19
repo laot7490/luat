@@ -1,10 +1,13 @@
+mod installed;
+pub(crate) use installed::{InstalledPackage, installed_packages};
+use installed::{LockFile, LockedPackage};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{IsTerminal, Read, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -17,139 +20,6 @@ mod catalog;
 pub(crate) use catalog::{
     PackageManifest, classified_files, manifest_files, read_manifest, require_versions,
 };
-
-#[derive(Clone, Debug)]
-pub(crate) struct InstalledPackage {
-    pub root: PathBuf,
-    pub manifest: PackageManifest,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LockFile {
-    schema: u32,
-    packages: BTreeMap<String, LockedPackage>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LockedPackage {
-    version: String,
-    commit: String,
-    files: BTreeMap<String, String>,
-}
-
-pub(crate) fn installed_packages(
-    root: &Path,
-    dependencies: &BTreeMap<String, String>,
-) -> Result<Vec<InstalledPackage>, String> {
-    if dependencies.is_empty() {
-        return Ok(Vec::new());
-    }
-    let path = root.join("luat.lock");
-    let lock: LockFile = toml::from_str(
-        &fs::read_to_string(&path)
-            .map_err(|_| "packages are not locked; run `luat install`".to_owned())?,
-    )
-    .map_err(|e| format!("error LT5301: Invalid luat.lock: {e}"))?;
-    if lock.schema != 1 {
-        return Err("unsupported luat.lock schema".into());
-    }
-    let mut result = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut active = std::collections::HashSet::new();
-    fn visit(
-        name: &str,
-        lock: &LockFile,
-        root: &Path,
-        visited: &mut std::collections::HashSet<String>,
-        active: &mut std::collections::HashSet<String>,
-        result: &mut Vec<InstalledPackage>,
-    ) -> Result<(), String> {
-        if active.contains(name) {
-            return Err(format!("package dependency cycle includes {name}"));
-        }
-        if !visited.insert(name.to_owned()) {
-            return Ok(());
-        }
-        active.insert(name.to_owned());
-        let entry = lock
-            .packages
-            .get(name)
-            .ok_or_else(|| format!("{name} is missing from luat.lock; run `luat install`"))?;
-        let directory = root.join(".luat/packages").join(name).join(&entry.version);
-        let manifest = read_manifest(&directory).map_err(|e| {
-            format!(
-                "{name}@{} is not installed ({e}); run `luat install`",
-                entry.version
-            )
-        })?;
-        if manifest.name != name || manifest.version != entry.version {
-            return Err(format!("{name} installed identity mismatch"));
-        }
-        if manifest.dependencies.len() > MAX_FILES {
-            return Err(format!("{name} has too many dependencies"));
-        }
-        for (file, expected) in &entry.files {
-            validate_relative_file(file)?;
-            let path = directory.join(file);
-            let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if !metadata.file_type().is_file()
-                || sha256(&fs::read(path).map_err(|e| e.to_string())?) != *expected
-            {
-                return Err(format!(
-                    "{name}@{} integrity check failed for {file}",
-                    entry.version
-                ));
-            }
-        }
-        let actual = manifest_files(&directory, &manifest)?;
-        if actual.keys().ne(entry.files.keys()) {
-            return Err(format!(
-                "{name}@{} files differ from luat.lock",
-                entry.version
-            ));
-        }
-        for dependency in dependencies_for(&manifest) {
-            let locked = lock
-                .packages
-                .get(dependency)
-                .ok_or_else(|| format!("dependency {dependency} is missing from luat.lock"))?;
-            let requirement = require_versions(&manifest.dependencies[dependency])?;
-            if !requirement.matches(&Version::parse(&locked.version).map_err(|e| e.to_string())?) {
-                return Err(format!(
-                    "locked {dependency}@{} does not satisfy {name}'s requirement",
-                    locked.version
-                ));
-            }
-        }
-        for dependency in manifest.dependencies.keys() {
-            visit(dependency, lock, root, visited, active, result)?;
-        }
-        active.remove(name);
-        result.push(InstalledPackage {
-            root: directory,
-            manifest,
-        });
-        Ok(())
-    }
-    for (name, requirement) in dependencies {
-        let entry = lock
-            .packages
-            .get(name)
-            .ok_or_else(|| format!("{name} is missing from luat.lock; run `luat install`"))?;
-        let requirement = require_versions(requirement)?;
-        let version = Version::parse(&entry.version).map_err(|e| e.to_string())?;
-        if !requirement.matches(&version) {
-            return Err(format!(
-                "locked {name}@{} does not satisfy the project's requirement",
-                entry.version
-            ));
-        }
-        visit(name, &lock, root, &mut visited, &mut active, &mut result)?;
-    }
-    Ok(result)
-}
 
 fn dependencies_for(manifest: &PackageManifest) -> impl Iterator<Item = &String> {
     manifest.dependencies.keys()
@@ -172,6 +42,9 @@ pub fn run(args: &[String]) -> Result<(), (u8, String)> {
         return Err((2, usage().to_owned()));
     };
     let (project, pretty, positional) = parse_options(&args[1..])?;
+    if command == "remove" && positional.is_empty() {
+        return Err((2, "error LT5001: Specify at least one package to remove.\n  help: Usage: luat remove <package ...> [--project <path>] [--pretty false]".into()));
+    }
     let config_path = project_config_path(&project)?;
     let root = config_path.parent().unwrap_or_else(|| Path::new("."));
     match command {
@@ -397,7 +270,7 @@ fn resolve_and_install(
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     catalog::validate_dependencies(&roots).map_err(|e| (2, format!("error LT5101: {e}")))?;
     if roots.is_empty() {
-        println!("Success: No packages are declared.");
+        crate::output::status("INFO", "No packages are declared.");
         return Ok(());
     }
     let lock_before_resolution = fs::read(root.join("luat.lock")).ok();
@@ -855,7 +728,7 @@ fn remove(root: &Path, config: &Path, args: &[String], pretty: bool) -> Result<(
             ));
         }
     }
-    for spec in specs {
+    for spec in &specs {
         doc.get_mut("dependencies")
             .and_then(toml_edit::Item::as_table_like_mut)
             .and_then(|table| table.remove(&spec.name));
@@ -948,9 +821,28 @@ fn remove(root: &Path, config: &Path, args: &[String], pretty: bool) -> Result<(
             ));
         }
         for (name, directory, package) in stale {
-            if validate_locked(&directory, &package).is_ok()
-                && let Err(error) = fs::remove_dir_all(&directory)
-            {
+            let package_dir = directory
+                .parent()
+                .expect("installed version has a package directory");
+            let cleanup = (|| {
+                if directory.try_exists().map_err(|error| error.to_string())? {
+                    validate_locked(&directory, &package)?;
+                    fs::remove_dir_all(&directory).map_err(|error| error.to_string())?;
+                }
+                match fs::remove_dir(package_dir) {
+                    Ok(()) => Ok(()),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            })();
+            if let Err(error) = cleanup {
                 eprintln!(
                     "{}",
                     crate::output::stderr_message(&format!(
@@ -960,7 +852,12 @@ fn remove(root: &Path, config: &Path, args: &[String], pretty: bool) -> Result<(
             }
         }
     }
-    status(pretty, "Saved", &config.display().to_string());
+    let names = specs
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    status(pretty, "Removed", &names);
     Ok(())
 }
 
@@ -1260,11 +1157,9 @@ fn urlencoding(value: &str) -> String {
     })
 }
 fn status(pretty: bool, label: &str, value: &str) {
-    if pretty && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-        println!("\x1b[32mSuccess:\x1b[0m {label} {value}");
-    } else {
-        println!("Success: {label} {value}");
-    }
+    crate::output::with_pretty(pretty, || {
+        crate::output::status("SUCCESS", &format!("{label} {value}"))
+    });
 }
 
 #[cfg(test)]
@@ -1430,10 +1325,10 @@ mod tests {
         let lock: LockFile =
             toml::from_str(&fs::read_to_string(root.join("luat.lock")).unwrap()).unwrap();
         assert!(!lock.packages.contains_key("app"));
-        assert!(!install.join("orphan/1.0.0").exists());
+        assert!(!install.join("orphan").exists());
         assert!(lock.packages.contains_key("other"));
         assert!(lock.packages.contains_key("common"));
-        assert!(!install.join("app/1.0.0").exists());
+        assert!(!install.join("app").exists());
         assert!(install.join("common/1.0.0").exists());
         fs::remove_dir_all(root).unwrap();
     }
