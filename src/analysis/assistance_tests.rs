@@ -361,6 +361,33 @@ fn unused_hints_track_reads_shadowing_and_safe_renames() {
 }
 
 #[test]
+fn concatenation_counts_as_a_parameter_read() {
+    let source = "local function printGreeting(name: ExampleName, unused: string): ()\n    print(\"Hello, \" .. name .. \"!\")\nend";
+    let (snapshot, path) = analyze(source);
+    let unused: Vec<_> = snapshot
+        .editor_diagnostics(&path)
+        .into_iter()
+        .filter(|hint| hint.code == "LTH1001")
+        .map(|hint| &source[hint.range])
+        .collect();
+    assert_eq!(unused, ["unused"]);
+}
+
+#[test]
+fn unfinished_template_keeps_semantic_tokens_and_document_symbols() {
+    for template in ["`merhaba {", "`merhaba {name", "`🚀 {name`"] {
+        let (snapshot, path) = analyze(&format!("local name = 'Ada'\nlocal greeting = {template}"));
+        assert!(!snapshot.semantic_tokens(&path).is_empty());
+        assert!(
+            snapshot
+                .document_symbols(&path)
+                .iter()
+                .any(|symbol| symbol.name == "name")
+        );
+    }
+}
+
+#[test]
 fn document_symbols_and_opt_in_inlay_data_use_source_ranges() {
     let source = "local count = 1\nlocal function outer(value: number)\n local function inner(text: string) end\n inner('hi')\nend\nouter(2)";
     let (snapshot, path) = analyze(source);

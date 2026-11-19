@@ -527,6 +527,7 @@ fn expand_template_body(body: &str, source_start: usize) -> (String, Vec<usize>)
         }
         let start = open + 1;
         let close = find_interpolation_end(body, start).unwrap_or(body.len());
+        pos = close + usize::from(close < body.len());
         if start == close {
             if part_count > 0 {
                 push_generated(&mut output, &mut offsets, " .. ", source_start + open);
@@ -534,7 +535,6 @@ fn expand_template_body(body: &str, source_start: usize) -> (String, Vec<usize>)
             push_generated(&mut output, &mut offsets, "tostring((", source_start + open);
             push_generated(&mut output, &mut offsets, "))", source_start + close);
             part_count += 1;
-            pos = close.saturating_add(1);
             continue;
         }
         if part_count > 0 {
@@ -545,7 +545,6 @@ fn expand_template_body(body: &str, source_start: usize) -> (String, Vec<usize>)
         append_source(body, start..close, source_start, &mut output, &mut offsets);
         push_generated(&mut output, &mut offsets, "))", source_start + close);
         part_count += 1;
-        pos = close.saturating_add(1);
     }
     if pos < body.len() {
         if part_count > 0 {
