@@ -260,7 +260,14 @@ impl Project {
         &self,
         overlays: &HashMap<PathBuf, String>,
     ) -> Result<ImportPlan, BuildError> {
-        self.analyze_imports_with_parser(overlays, None, None)
+        self.analyze_imports_incremental(
+            overlays,
+            None,
+            None,
+            None,
+            &mut HashMap::new(),
+            &mut |_| {},
+        )
     }
 
     pub(crate) fn analyze_imports_with_parser(
@@ -268,8 +275,16 @@ impl Project {
         overlays: &HashMap<PathBuf, String>,
         parse: Option<&SourceParser<'_>>,
         previous: Option<&ImportPlan>,
+        declarations: &mut ScopedDeclarations,
     ) -> Result<ImportPlan, BuildError> {
-        self.analyze_imports_incremental(overlays, parse, previous, None, &mut HashMap::new())
+        self.analyze_imports_incremental(
+            overlays,
+            parse,
+            previous,
+            previous,
+            declarations,
+            &mut |_| {},
+        )
     }
 
     pub(super) fn analyze_imports_incremental(
@@ -279,6 +294,7 @@ impl Project {
         previous: Option<&ImportPlan>,
         reuse: Option<&ImportPlan>,
         declarations: &mut ScopedDeclarations,
+        progress: &mut dyn FnMut(&Path),
     ) -> Result<ImportPlan, BuildError> {
         let mut modules = BTreeMap::new();
         let mut plan = ImportPlan::default();
@@ -381,6 +397,7 @@ impl Project {
             let Some(path) = paths.get(&id).cloned() else {
                 continue;
             };
+            progress(&path);
             let source = match overlays.get(&path) {
                 Some(source) => source.clone(),
                 None => fs::read_to_string(&path).map_err(|source| BuildError::Io {
@@ -403,7 +420,12 @@ impl Project {
                     })
             };
             self.validate_package_return(&path, &parsed)?;
-            let calls = parsed.import_calls().map_err(|error| BuildError::Compile {
+            let calls = if parse.is_some() {
+                parsed.editor_import_calls()
+            } else {
+                parsed.import_calls()
+            }
+            .map_err(|error| BuildError::Compile {
                 path: path.clone(),
                 error,
             })?;

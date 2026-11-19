@@ -1,7 +1,9 @@
 mod config;
+mod declarations;
 pub(crate) mod imports;
 mod manifest;
 mod packages;
+mod publish;
 
 use config::FiveMConfig;
 pub use config::ProjectConfig;
@@ -16,7 +18,7 @@ use crate::compiler::declarations::{DeclarationSet, DeclarationSource};
 use crate::{CompileError, Diagnostic};
 
 type DeclarationInputs = Vec<(PathBuf, String)>;
-type ScopedDeclarations = HashMap<DeclarationInputs, std::sync::Arc<DeclarationSet>>;
+pub(crate) type ScopedDeclarations = HashMap<DeclarationInputs, std::sync::Arc<DeclarationSet>>;
 type Outputs = Vec<(PathBuf, String)>;
 type CompiledFiles = HashMap<PathBuf, (PathBuf, String)>;
 
@@ -26,6 +28,7 @@ pub struct BuildSession {
     declarations: ScopedDeclarations,
     compiled: CompiledFiles,
     published: Option<(PathBuf, Outputs, String)>,
+    watching: bool,
 }
 
 #[derive(Debug)]
@@ -103,6 +106,28 @@ pub struct BuildResult {
     pub compiled_files: usize,
     pub declaration_files: usize,
     pub output_dir: Option<PathBuf>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum OutputChange {
+    Added(PathBuf),
+    Updated(PathBuf),
+    Removed(PathBuf),
+}
+
+#[doc(hidden)]
+pub enum BuildProgress<'a> {
+    Stage(BuildStage),
+    Analyzing(&'a Path),
+    Transforming(&'a Path),
+}
+
+#[doc(hidden)]
+pub enum BuildStage {
+    Analyze,
+    Compile,
+    Finalize,
 }
 
 impl Project {
@@ -423,6 +448,11 @@ impl Project {
         Ok(project)
     }
 
+    #[doc(hidden)]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -523,15 +553,21 @@ impl Project {
                 .map(|contexts| contexts.iter().copied().map(Some).collect::<Vec<_>>())
                 .filter(|contexts| !contexts.is_empty())
                 .unwrap_or_else(|| vec![None]);
-            let owned_declarations = if self.package_sources.contains_key(&file.input) {
-                match self.read_declarations_for(Some(&file.input), &HashMap::new()) {
-                    Ok(value) => Some(value),
-                    Err(error) => return (checked, Err(error), self.resolved_imports(plan)),
-                }
-            } else {
-                None
-            };
-            let declarations = owned_declarations.as_ref().unwrap_or(declarations);
+            let owner = self.declaration_owner(Some(&file.input));
+            let scoped = plan.declaration_sets.get(&owner);
+            let owned_declarations =
+                if scoped.is_none() && self.package_sources.contains_key(&file.input) {
+                    match self.read_declarations_for(Some(&file.input), &plan.texts) {
+                        Ok(value) => Some(value),
+                        Err(error) => return (checked, Err(error), self.resolved_imports(plan)),
+                    }
+                } else {
+                    None
+                };
+            let declarations = scoped
+                .map(AsRef::as_ref)
+                .or(owned_declarations.as_ref())
+                .unwrap_or(declarations);
             let mut diagnostics = Vec::new();
             for context in contexts {
                 if let Err(error) = parsed.check(
@@ -565,7 +601,8 @@ impl Project {
         overlays: &std::collections::HashMap<PathBuf, String>,
     ) -> Result<BuildResult, BuildError> {
         let mut cache = HashMap::new();
-        let mut plan = self.analyze_imports_incremental(overlays, None, None, None, &mut cache)?;
+        let mut plan =
+            self.analyze_imports_incremental(overlays, None, None, None, &mut cache, &mut |_| {})?;
         self.populate_declarations(&mut plan, &mut cache)?;
         let mut errors = Vec::new();
         for file in &self.sources {
@@ -687,12 +724,55 @@ impl Project {
         &self,
         session: &mut BuildSession,
     ) -> Result<BuildResult, BuildError> {
+        self.build_with_progress(session, |_| {})
+    }
+
+    #[doc(hidden)]
+    pub fn build_with_progress(
+        &self,
+        session: &mut BuildSession,
+        mut progress: impl FnMut(BuildStage),
+    ) -> Result<BuildResult, BuildError> {
+        self.build_with_file_progress(session, |event| {
+            if let BuildProgress::Stage(stage) = event {
+                progress(stage);
+            }
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn build_with_file_progress(
+        &self,
+        session: &mut BuildSession,
+        mut progress: impl FnMut(BuildProgress<'_>),
+    ) -> Result<BuildResult, BuildError> {
+        self.build_session(session, &mut progress, false)
+            .map(|(result, _)| result)
+    }
+
+    #[doc(hidden)]
+    pub fn build_for_watch(
+        &self,
+        session: &mut BuildSession,
+    ) -> Result<Vec<OutputChange>, BuildError> {
+        self.build_session(session, &mut |_| {}, true)
+            .map(|(_, changes)| changes)
+    }
+
+    fn build_session(
+        &self,
+        session: &mut BuildSession,
+        progress: &mut dyn FnMut(BuildProgress<'_>),
+        watch: bool,
+    ) -> Result<(BuildResult, Vec<OutputChange>), BuildError> {
+        progress(BuildProgress::Stage(BuildStage::Analyze));
         let mut plan = self.analyze_imports_incremental(
             &HashMap::new(),
             None,
             None,
             session.previous.as_ref(),
             &mut session.declarations,
+            &mut |path| progress(BuildProgress::Analyzing(path)),
         )?;
         self.populate_declarations(&mut plan, &mut session.declarations)?;
         session.declarations.retain(|_, declarations| {
@@ -700,7 +780,9 @@ impl Project {
                 .values()
                 .any(|set| std::sync::Arc::ptr_eq(set, declarations))
         });
-        let (outputs, compiled) = self.compile_all(&plan, session)?;
+        progress(BuildProgress::Stage(BuildStage::Compile));
+        let (outputs, compiled) = self.compile_all(&plan, session, progress)?;
+        progress(BuildProgress::Stage(BuildStage::Finalize));
         let mut package_ignores = Vec::new();
         for file in &self.sources {
             if self.package_sources.contains_key(&file.input)
@@ -734,23 +816,39 @@ impl Project {
             self.manifest.clone()
         };
         let published = (self.output_dir.clone(), outputs, manifest);
-        if session.published.as_ref() != Some(&published)
-            || !self.output_dir.is_dir()
-            || !self.root.join("fxmanifest.lua").is_file()
-        {
-            self.publish(&published.1, &published.2)?;
-        }
+        let changes = if watch {
+            let previous = session
+                .published
+                .as_ref()
+                .filter(|(dir, _, _)| session.watching && dir == &self.output_dir);
+            self.publish_watch(
+                &published.1,
+                &published.2,
+                previous.map(|(_, files, _)| files.as_slice()),
+            )?
+        } else {
+            if session.watching
+                || session.published.as_ref() != Some(&published)
+                || !self.output_dir.is_dir()
+                || !self.root.join("fxmanifest.lua").is_file()
+            {
+                self.publish(&published.1, &published.2)?;
+            }
+            Vec::new()
+        };
+        session.watching = watch;
         let result = self.result(Some(self.output_dir.clone()), &plan);
         session.published = Some(published);
         session.previous = Some(plan);
         session.compiled = compiled;
-        Ok(result)
+        Ok((result, changes))
     }
 
     fn compile_all(
         &self,
         plan: &imports::ImportPlan,
         session: &BuildSession,
+        progress: &mut dyn FnMut(BuildProgress<'_>),
     ) -> Result<(Outputs, CompiledFiles), BuildError> {
         let mut outputs = Vec::new();
         let mut compiled = HashMap::new();
@@ -771,7 +869,10 @@ impl Project {
                 .filter(|(path, _)| path == relative);
             let result = match reused {
                 Some((_, output)) => Ok(output.clone()),
-                None => self.compile(file, plan.declarations_for(self, Some(&file.input)), plan),
+                None => {
+                    progress(BuildProgress::Transforming(&file.input));
+                    self.compile(file, plan.declarations_for(self, Some(&file.input)), plan)
+                }
             };
             match result {
                 Ok(contents) => {
@@ -797,158 +898,6 @@ impl Project {
         } else {
             Err(compile_errors(errors))
         }
-    }
-
-    #[cfg(test)]
-    fn read_declarations(&self) -> Result<DeclarationSet, BuildError> {
-        self.read_declarations_with_overlays(&HashMap::new())
-    }
-
-    pub(crate) fn read_declarations_with_overlays(
-        &self,
-        overlays: &std::collections::HashMap<PathBuf, String>,
-    ) -> Result<DeclarationSet, BuildError> {
-        let mut checked = HashSet::new();
-        for (path, root) in &self.package_declaration_roots {
-            if !(self.package_root && root == &self.root) && checked.insert(root) {
-                self.read_declarations_for(Some(path), overlays)?;
-            }
-        }
-        self.read_declarations_for(None, overlays)
-    }
-
-    fn read_declarations_for(
-        &self,
-        path: Option<&Path>,
-        overlays: &HashMap<PathBuf, String>,
-    ) -> Result<DeclarationSet, BuildError> {
-        self.parse_declarations(&self.declaration_inputs(path, overlays)?)
-    }
-
-    fn populate_declarations(
-        &self,
-        plan: &mut imports::ImportPlan,
-        cache: &mut ScopedDeclarations,
-    ) -> Result<(), BuildError> {
-        for path in self
-            .package_declaration_roots
-            .keys()
-            .chain(
-                plan.parsed
-                    .keys()
-                    .filter(|path| self.package_sources.contains_key(*path)),
-            )
-            .map(|path| Some(path.as_path()))
-            .chain(std::iter::once(None))
-            .collect::<Vec<_>>()
-        {
-            let owner = self.declaration_owner(path);
-            if !plan.declaration_sets.contains_key(&owner) {
-                let declarations = self.cached_declarations(path, &plan.texts, cache)?;
-                plan.declaration_sets.insert(owner, declarations);
-            }
-        }
-        Ok(())
-    }
-
-    fn declaration_owner(&self, path: Option<&Path>) -> Option<PathBuf> {
-        path.and_then(|path| {
-            self.package_sources
-                .get(path)
-                .map(|source| &source.root)
-                .or_else(|| self.package_declaration_roots.get(path))
-        })
-        .or_else(|| self.package_root.then_some(&self.root))
-        .cloned()
-    }
-
-    fn cached_declarations(
-        &self,
-        path: Option<&Path>,
-        texts: &HashMap<PathBuf, String>,
-        cache: &mut ScopedDeclarations,
-    ) -> Result<std::sync::Arc<DeclarationSet>, BuildError> {
-        let inputs = self.declaration_inputs(path, texts)?;
-        if let Some(set) = cache.get(&inputs) {
-            return Ok(set.clone());
-        }
-        let set = std::sync::Arc::new(self.parse_declarations(&inputs)?);
-        cache.insert(inputs, set.clone());
-        Ok(set)
-    }
-
-    fn declaration_inputs(
-        &self,
-        path: Option<&Path>,
-        overlays: &HashMap<PathBuf, String>,
-    ) -> Result<DeclarationInputs, BuildError> {
-        let package_scope = self.package_declaration_scope(path);
-        self.declarations
-            .iter()
-            .filter(|path| {
-                package_scope.as_ref().is_none_or(|roots| {
-                    self.package_declaration_roots
-                        .get(*path)
-                        .is_some_and(|root| roots.contains(root))
-                })
-            })
-            .map(|path| {
-                let text = overlays
-                    .get(path)
-                    .cloned()
-                    .map(Ok)
-                    .unwrap_or_else(|| fs::read_to_string(path))
-                    .map_err(|source| BuildError::Io {
-                        path: path.clone(),
-                        source,
-                    })?;
-                Ok((path.clone(), text))
-            })
-            .collect()
-    }
-
-    fn parse_declarations(&self, inputs: &DeclarationInputs) -> Result<DeclarationSet, BuildError> {
-        let mut sources = vec![
-            DeclarationSource {
-                path: None,
-                context: Some(crate::ExecutionContext::Client),
-                text: include_str!("../../lsp/definitions/fivem-client.d.luat").to_owned(),
-            },
-            DeclarationSource {
-                path: None,
-                context: Some(crate::ExecutionContext::Server),
-                text: include_str!("../../lsp/definitions/fivem-server.d.luat").to_owned(),
-            },
-            DeclarationSource {
-                path: None,
-                context: None,
-                text: include_str!("../../lsp/definitions/fivem-shared.d.luat").to_owned(),
-            },
-            DeclarationSource {
-                path: None,
-                context: None,
-                text: include_str!("../../lsp/definitions/runtime-shared.d.luat").to_owned(),
-            },
-            DeclarationSource {
-                path: None,
-                context: Some(crate::ExecutionContext::Client),
-                text: include_str!("../../lsp/definitions/runtime-client.d.luat").to_owned(),
-            },
-            DeclarationSource {
-                path: None,
-                context: Some(crate::ExecutionContext::Server),
-                text: include_str!("../../lsp/definitions/runtime-server.d.luat").to_owned(),
-            },
-        ];
-        sources.extend(inputs.iter().map(|(path, text)| DeclarationSource {
-            path: Some(path.clone()),
-            context: None,
-            text: text.clone(),
-        }));
-        DeclarationSet::from_sources(sources).map_err(|(path, error)| BuildError::Compile {
-            path: path.unwrap_or_else(|| self.config_path.clone()),
-            error,
-        })
     }
 
     fn compile(
@@ -1048,220 +997,6 @@ impl Project {
                 .count(),
             output_dir,
         }
-    }
-
-    fn publish(&self, outputs: &[(PathBuf, String)], manifest: &str) -> Result<(), BuildError> {
-        let parent = self.output_dir.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent).map_err(|source| BuildError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        let staging = unique_sibling(&self.output_dir, "staging")?;
-        fs::create_dir(&staging).map_err(|source| BuildError::Io {
-            path: staging.clone(),
-            source,
-        })?;
-
-        let write_result = outputs.iter().try_for_each(|(relative, contents)| {
-            let path = staging.join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|source| BuildError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            fs::write(&path, contents).map_err(|source| BuildError::Io { path, source })
-        });
-        if let Err(error) = write_result {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-
-        let manifest_path = self.root.join("fxmanifest.lua");
-        let manifest_temp = match unique_sibling(&manifest_path, "staging") {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(error);
-            }
-        };
-        let mut manifest_file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&manifest_temp)
-        {
-            Ok(file) => file,
-            Err(source) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(BuildError::Io {
-                    path: manifest_temp,
-                    source,
-                });
-            }
-        };
-        if let Err(source) = manifest_file.write_all(manifest.as_bytes()) {
-            let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_file(&manifest_temp);
-            return Err(BuildError::Io {
-                path: manifest_temp,
-                source,
-            });
-        }
-        drop(manifest_file);
-
-        let output_backup = if self.output_dir.exists() {
-            let backup = match unique_sibling(&self.output_dir, "backup") {
-                Ok(path) => path,
-                Err(error) => {
-                    let _ = fs::remove_dir_all(&staging);
-                    let _ = fs::remove_file(&manifest_temp);
-                    return Err(error);
-                }
-            };
-            if let Err(source) = fs::rename(&self.output_dir, &backup) {
-                let _ = fs::remove_dir_all(&staging);
-                let _ = fs::remove_file(&manifest_temp);
-                return Err(BuildError::Io {
-                    path: self.output_dir.clone(),
-                    source,
-                });
-            }
-            Some(backup)
-        } else {
-            None
-        };
-
-        let manifest_backup = if manifest_path.exists() {
-            let manifest_backup_path = match unique_sibling(&manifest_path, "backup") {
-                Ok(path) => path,
-                Err(error) => {
-                    let rollback = output_backup.as_ref().and_then(|previous| {
-                        fs::rename(previous, &self.output_dir)
-                            .err()
-                            .map(|error| (previous, error))
-                    });
-                    let _ = fs::remove_dir_all(&staging);
-                    let _ = fs::remove_file(&manifest_temp);
-                    if let Some((previous, rollback_error)) = rollback {
-                        return Err(BuildError::Configuration {
-                            path: self.output_dir.clone(),
-                            message: format!(
-                                "could not prepare manifest backup ({error}); previous output remains at {} because rollback failed ({rollback_error})",
-                                previous.display()
-                            ),
-                        });
-                    }
-                    return Err(error);
-                }
-            };
-            if let Err(source) = fs::rename(&manifest_path, &manifest_backup_path) {
-                let rollback = output_backup.as_ref().and_then(|previous| {
-                    fs::rename(previous, &self.output_dir)
-                        .err()
-                        .map(|error| (previous, error))
-                });
-                let _ = fs::remove_dir_all(&staging);
-                let _ = fs::remove_file(&manifest_temp);
-                if let Some((previous, rollback_error)) = rollback {
-                    return Err(BuildError::Configuration {
-                        path: self.output_dir.clone(),
-                        message: format!(
-                            "could not stage manifest ({source}); previous output remains at {} because rollback failed ({rollback_error})",
-                            previous.display()
-                        ),
-                    });
-                }
-                return Err(BuildError::Io {
-                    path: manifest_path,
-                    source,
-                });
-            }
-            Some(manifest_backup_path)
-        } else {
-            None
-        };
-
-        if let Err(source) = fs::rename(&staging, &self.output_dir) {
-            let manifest_rollback = manifest_backup.as_ref().and_then(|backup| {
-                fs::rename(backup, &manifest_path)
-                    .err()
-                    .map(|error| (backup, error))
-            });
-            let output_rollback = output_backup.as_ref().and_then(|backup| {
-                fs::rename(backup, &self.output_dir)
-                    .err()
-                    .map(|error| (backup, error))
-            });
-            if let Some((backup, rollback_error)) = manifest_rollback.or(output_rollback) {
-                let _ = fs::remove_dir_all(&staging);
-                let _ = fs::remove_file(&manifest_temp);
-                return Err(BuildError::Configuration {
-                    path: backup.clone(),
-                    message: format!(
-                        "could not publish output ({source}); previous data remains at {} because rollback failed ({rollback_error})",
-                        backup.display()
-                    ),
-                });
-            }
-            let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_file(&manifest_temp);
-            return Err(BuildError::Io {
-                path: self.output_dir.clone(),
-                source,
-            });
-        }
-        if let Err(source) = fs::rename(&manifest_temp, &manifest_path) {
-            let remove_error = fs::remove_dir_all(&self.output_dir).err();
-            let output_rollback = output_backup.as_ref().and_then(|backup| {
-                fs::rename(backup, &self.output_dir)
-                    .err()
-                    .map(|error| (backup, error))
-            });
-            let manifest_rollback = manifest_backup.as_ref().and_then(|backup| {
-                fs::rename(backup, &manifest_path)
-                    .err()
-                    .map(|error| (backup, error))
-            });
-            let _ = fs::remove_file(&manifest_temp);
-            if let Some((backup, rollback_error)) = output_rollback.or(manifest_rollback) {
-                return Err(BuildError::Configuration {
-                    path: backup.clone(),
-                    message: format!(
-                        "could not publish manifest ({source}); previous data remains at {} because rollback failed ({rollback_error})",
-                        backup.display()
-                    ),
-                });
-            }
-            if let Some(remove_error) = remove_error {
-                return Err(BuildError::Configuration {
-                    path: self.output_dir.clone(),
-                    message: format!(
-                        "could not publish manifest ({source}) or remove the new output during rollback ({remove_error})"
-                    ),
-                });
-            }
-            return Err(BuildError::Io {
-                path: manifest_path,
-                source,
-            });
-        }
-        if let Some(backup) = output_backup
-            && let Err(error) = fs::remove_dir_all(&backup)
-        {
-            crate::output::warning(&format!(
-                "Build succeeded, but the previous output backup remains at {} ({error}).",
-                backup.display()
-            ));
-        }
-        if let Some(backup) = manifest_backup
-            && let Err(error) = fs::remove_file(&backup)
-        {
-            crate::output::warning(&format!(
-                "Build succeeded, but the previous manifest backup remains at {} ({error}).",
-                backup.display()
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -1379,22 +1114,6 @@ fn reject_symlink_path(root: &Path, path: &Path, config: &Path) -> Result<(), Bu
         }
     }
     Ok(())
-}
-
-fn unique_sibling(target: &Path, kind: &str) -> Result<PathBuf, BuildError> {
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let name = target.file_name().unwrap_or_default().to_string_lossy();
-    for suffix in 0..1000 {
-        let path = parent.join(format!(".{name}.{kind}.{}.{suffix}", std::process::id()));
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
-            Ok(_) | Err(_) => continue,
-        }
-    }
-    Err(BuildError::Configuration {
-        path: target.to_path_buf(),
-        message: "could not allocate a temporary output directory".to_owned(),
-    })
 }
 
 #[cfg(test)]

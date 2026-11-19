@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{BuildError, Project, ProjectConfig};
+use super::{BuildError, OutputChange, Project, ProjectConfig};
 use crate::Diagnostic;
 
 fn temp_project() -> PathBuf {
@@ -77,11 +77,23 @@ fn watch_session_reuses_unaffected_modules_and_recovers_from_failed_builds() {
     )
     .unwrap();
     let mut session = super::BuildSession::default();
-    let rebuild = |session: &mut super::BuildSession| {
-        Project::load(&root).unwrap().build_with_session(session)
-    };
+    let rebuild =
+        |session: &mut super::BuildSession| Project::load(&root).unwrap().build_for_watch(session);
     rebuild(&mut session).unwrap();
     let before = fs::read(root.join("dist/main.lua")).unwrap();
+    let modified = fs::metadata(root.join("dist/main.lua"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(
+        Project::load(&root)
+            .unwrap()
+            .build_for_watch(&mut super::BuildSession::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(rebuild(&mut session).unwrap().is_empty());
+    fs::write(root.join("dist/local.txt"), "keep").unwrap();
     let parsed = session.previous.as_ref().unwrap().parsed[&main].clone();
     fs::write(&api, "return { value = 'bad' }").unwrap();
     assert!(rebuild(&mut session).is_err());
@@ -91,14 +103,26 @@ fn watch_session_reuses_unaffected_modules_and_recovers_from_failed_builds() {
     assert!(rebuild(&mut session).is_err());
     assert!(!root.join("dist/extra.lua").exists());
     fs::write(&api, "return { value = 2 }").unwrap();
-    rebuild(&mut session).unwrap();
+    let changes = rebuild(&mut session).unwrap();
+    assert!(changes.contains(&OutputChange::Updated(PathBuf::from("dist/api.lua"))));
+    assert!(changes.contains(&OutputChange::Added(PathBuf::from("dist/extra.lua"))));
     assert!(std::sync::Arc::ptr_eq(
         &parsed,
         &session.previous.as_ref().unwrap().parsed[&main]
     ));
     assert_eq!(before, fs::read(root.join("dist/main.lua")).unwrap());
+    assert_eq!(
+        modified,
+        fs::metadata(root.join("dist/main.lua"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    );
+    assert!(root.join("dist/local.txt").exists());
     fs::rename(extra, src.join("renamed.luat")).unwrap();
-    rebuild(&mut session).unwrap();
+    let changes = rebuild(&mut session).unwrap();
+    assert!(changes.contains(&OutputChange::Removed(PathBuf::from("dist/extra.lua"))));
+    assert!(changes.contains(&OutputChange::Added(PathBuf::from("dist/renamed.lua"))));
     assert!(!root.join("dist/extra.lua").exists());
     assert!(root.join("dist/renamed.lua").exists());
     let output = fs::read(root.join("dist/renamed.lua")).unwrap();
@@ -785,4 +809,80 @@ fn imported_exports_use_declarations_and_each_execution_context() {
     assert!(result.is_err());
     assert!(checked.contains(&root.join("src/client/main.luat")));
     assert!(checked.contains(&root.join("src/server/main.luat")));
+}
+
+#[test]
+fn watch_reconciles_stale_output_and_reports_manifest_only_changes() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("dist/old")).unwrap();
+    fs::write(root.join("dist/old/dead.lua"), "old").unwrap();
+    fs::write(root.join("dist/same.lua"), "same").unwrap();
+    fs::write(root.join("fxmanifest.lua"), "manifest").unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='watch'\n").unwrap();
+    let project = Project::load(&root).unwrap();
+    let outputs = [(PathBuf::from("same.lua"), "same".into())];
+    assert_eq!(
+        project.publish_watch(&outputs, "manifest", None).unwrap(),
+        [OutputChange::Removed(PathBuf::from("dist/old/dead.lua"))],
+    );
+    assert!(!root.join("dist/old").exists());
+    assert_eq!(
+        project
+            .publish_watch(&outputs, "updated", Some(&outputs))
+            .unwrap(),
+        [OutputChange::Updated(PathBuf::from("fxmanifest.lua"))],
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn watch_rolls_back_when_windows_prevents_renaming_an_output() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = temp_project();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='watch'\n").unwrap();
+    let project = Project::load(&root).unwrap();
+    let previous = [
+        (PathBuf::from("a.lua"), "old a".into()),
+        (PathBuf::from("b.lua"), "old b".into()),
+    ];
+    project
+        .publish_watch(&previous, "old manifest", None)
+        .unwrap();
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(root.join("dist/b.lua"))
+        .unwrap();
+    let next = [
+        (PathBuf::from("a.lua"), "new a".into()),
+        (PathBuf::from("b.lua"), "new b".into()),
+    ];
+    let error = project
+        .publish_watch(&next, "new manifest", Some(&previous))
+        .unwrap_err();
+    assert!(matches!(error, BuildError::Io { path, .. } if path == root.join("dist/b.lua")));
+    assert_eq!(
+        fs::read_to_string(root.join("dist/a.lua")).unwrap(),
+        "old a"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("dist/b.lua")).unwrap(),
+        "old b"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("fxmanifest.lua")).unwrap(),
+        "old manifest"
+    );
+    drop(locked);
+    assert_eq!(
+        project
+            .publish_watch(&next, "new manifest", Some(&previous))
+            .unwrap()
+            .len(),
+        3
+    );
+    fs::remove_dir_all(root).unwrap();
 }
