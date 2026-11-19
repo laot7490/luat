@@ -302,6 +302,15 @@ pub(super) fn is_assignable(
         return if uncertain { None } else { Some(true) };
     }
 
+    if actual.starts_with("$package")
+        && matches!(
+            expected,
+            "number" | "integer" | "string" | "boolean" | "nil" | "table" | "function"
+        )
+        && let Some(resolved) = resolve_alias_chain(actual, aliases)
+    {
+        return is_assignable(&resolved, expected, aliases, seen);
+    }
     if expected == "number" {
         return Some(matches!(actual, "number" | "integer"));
     }

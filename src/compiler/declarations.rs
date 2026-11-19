@@ -56,6 +56,7 @@ pub(crate) struct DeclarationLocation {
 
 pub(crate) struct DeclaredFunction {
     pub(super) signature: FunctionSignature,
+    pub(super) project: bool,
     pub(crate) context: Option<ExecutionContext>,
     pub(crate) documentation: String,
     pub(crate) location: DeclarationLocation,
@@ -67,6 +68,7 @@ pub(crate) struct DeclaredGlobal {
     pub(crate) documentation: String,
     pub(crate) location: DeclarationLocation,
     pub(crate) context: Option<ExecutionContext>,
+    pub(super) project: bool,
 }
 
 pub(crate) struct DeclarationSource {
@@ -92,6 +94,7 @@ pub(crate) struct DeclarationSet {
     pub(crate) globals: HashMap<String, DeclaredGlobal>,
     pub(crate) scoped_globals: HashMap<ExecutionContext, HashMap<String, DeclaredGlobal>>,
     pub(crate) files: Vec<DeclarationFile>,
+    pub(super) package_aliases: HashMap<Option<ExecutionContext>, HashMap<String, String>>,
 }
 
 impl DeclarationSet {
@@ -174,6 +177,7 @@ impl DeclarationSet {
                             .or_default()
                             .push(DeclaredFunction {
                                 signature,
+                                project,
                                 context,
                                 documentation: documentation_before(&source.text, start),
                                 location: DeclarationLocation {
@@ -268,6 +272,7 @@ impl DeclarationSet {
             for mut global in globals {
                 global.location.path = source.path.clone();
                 global.context = context;
+                global.project = project;
                 if set.functions.get(&global.name).is_some_and(|functions| {
                     functions.iter().any(|function| {
                         context.is_none()
@@ -348,6 +353,51 @@ impl DeclarationSet {
         if validate_declarations {
             super::typecheck::validate_declaration_types(&set, false)?;
         }
+        let mut bound_aliases = Vec::new();
+        for (scope, context) in [
+            None,
+            Some(ExecutionContext::Client),
+            Some(ExecutionContext::Server),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let scoped = context.and_then(|side| set.scoped_aliases.get(&side));
+            let project_scoped = context.and_then(|side| project_scoped_aliases.get(&side));
+            let mut package_names = set
+                .aliases
+                .keys()
+                .chain(scoped.into_iter().flat_map(|aliases| aliases.keys()));
+            if package_names.any(|name| {
+                project_aliases.contains_key(name)
+                    || project_scoped.is_some_and(|aliases| aliases.contains_key(name))
+            }) {
+                let mut aliases = set.aliases.clone();
+                if let Some(scoped) = scoped {
+                    aliases.extend(scoped.clone());
+                }
+                let bindings: HashMap<_, _> = aliases
+                    .keys()
+                    .map(|name| (name.clone(), format!("$package{scope}_{name}")))
+                    .collect();
+                let mut bound = HashMap::new();
+                for (name, mut alias) in aliases {
+                    alias.definition = super::typecheck::bind_package_aliases(
+                        &alias.definition,
+                        &bindings,
+                        &alias.parameters,
+                    );
+                    bound.insert(bindings[&name].clone(), alias.clone());
+                    if !project_aliases.contains_key(&name)
+                        && project_scoped.is_none_or(|aliases| !aliases.contains_key(&name))
+                    {
+                        bound.insert(name, alias);
+                    }
+                }
+                set.package_aliases.insert(context, bindings);
+                bound_aliases.push((context, bound));
+            }
+        }
         for aliases in set.scoped_aliases.values_mut() {
             aliases.retain(|name, _| !project_aliases.contains_key(name));
         }
@@ -357,6 +407,16 @@ impl DeclarationSet {
                 .entry(context)
                 .or_default()
                 .extend(aliases);
+        }
+        for (context, aliases) in bound_aliases {
+            if let Some(context) = context {
+                set.scoped_aliases
+                    .entry(context)
+                    .or_default()
+                    .extend(aliases);
+            } else {
+                set.aliases.extend(aliases);
+            }
         }
         if validate_declarations && set.files.iter().any(|file| file.project) {
             super::typecheck::validate_declaration_types(&set, true)?;
@@ -372,6 +432,11 @@ pub(crate) fn parse_declaration_file(
         return Err(error);
     }
     let prepared = super::syntax::prepare(source);
+    if !prepared.template_diagnostics.is_empty() {
+        return Err(CompileError {
+            diagnostics: prepared.template_diagnostics,
+        });
+    }
     let version = LuaVersion::cfxlua().with_luau();
     let tokens = match Lexer::new(&prepared.text, version).collect() {
         LexerResult::Ok(tokens) | LexerResult::Recovered(tokens, _) => tokens,
@@ -449,6 +514,7 @@ pub(crate) fn parse_declaration_file(
                     .unwrap_or(name_start);
                 let start = prepared.original_offset(start);
                 globals.push(DeclaredGlobal {
+                    project: false,
                     name,
                     type_name: type_specifier
                         .unwrap()

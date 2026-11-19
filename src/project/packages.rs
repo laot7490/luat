@@ -351,6 +351,28 @@ mod tests {
     }
 
     #[test]
+    fn package_ambient_types_keep_their_aliases_when_project_shadows_them() {
+        let mut project = project();
+        let entry = project.root.join("src/client/main.luat");
+        attach(
+            &mut project,
+            "ambient",
+            "typedef ConsumerOnly = number\ntypedef Payload = { id: ConsumerOnly, next?: Payload }\ndeclare PackageValue: Payload\nfunction PackageCheck(value: ConsumerOnly): ConsumerOnly end",
+            false,
+            "shared",
+            &[],
+        );
+        fs::write(&entry, "local projectValue: ConsumerOnly = true\nlocal packageId: number = PackageValue.id\nlocal record: Payload = { id = packageId, next = { id = 2 } }\nlocal result: number = PackageCheck(record.id)\nreturn result").unwrap();
+        project.check_current().unwrap();
+        project.build_current().unwrap();
+        fs::write(&entry, "PackageCheck(true)").unwrap();
+        let error = project.check_current().unwrap_err().to_string();
+        assert!(error.contains("LT2002"), "{error}");
+        assert!(!error.contains("$package"), "{error}");
+        fs::remove_dir_all(project.root).unwrap();
+    }
+
+    #[test]
     fn package_declarations_follow_dependency_chain_without_consumer_or_sibling_types() {
         let mut project = project();
         attach(

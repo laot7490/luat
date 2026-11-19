@@ -2711,9 +2711,27 @@ fn infer_export_expression_type(checker: &TypeChecker<'_>, expression: &Expressi
 }
 
 fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>) -> String {
+    map_aliases(&type_name, Some(aliases), None, &[])
+}
+
+pub(super) fn bind_package_aliases(
+    type_name: &str,
+    bindings: &HashMap<String, String>,
+    generics: &[String],
+) -> String {
+    map_aliases(type_name, None, Some(bindings), generics)
+}
+
+fn map_aliases(
+    type_name: &str,
+    aliases: Option<&HashMap<String, TypeAlias>>,
+    bindings: Option<&HashMap<String, String>>,
+    generics: &[String],
+) -> String {
     fn expand(
         type_name: &str,
-        aliases: &HashMap<String, TypeAlias>,
+        aliases: Option<&HashMap<String, TypeAlias>>,
+        bindings: Option<&HashMap<String, String>>,
         generics: &[String],
         seen: &mut HashSet<String>,
     ) -> String {
@@ -2721,22 +2739,40 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
         if generics.iter().any(|generic| generic == type_name) {
             return type_name.to_owned();
         }
+        if bindings.is_some()
+            && let Some(base) = type_name.strip_prefix("...")
+        {
+            return format!("...{}", expand(base, aliases, bindings, generics, seen));
+        }
         if let Some(base) = type_name.strip_suffix('?') {
-            return format!("{}?", expand(base, aliases, generics, seen));
+            return format!("{}?", expand(base, aliases, bindings, generics, seen));
         }
         let members = split_union(type_name);
         if members.len() > 1 {
             return members
                 .into_iter()
-                .map(|member| expand(member, aliases, generics, seen))
+                .map(|member| expand(member, aliases, bindings, generics, seen))
                 .collect::<Vec<_>>()
                 .join(" | ");
         }
-        if let Some(expanded) = resolve_alias(type_name, aliases)
-            && seen.insert(type_name.to_owned())
+        let members = split_top_level(type_name, '&');
+        if bindings.is_some() && members.len() > 1 {
+            return members
+                .into_iter()
+                .map(|member| expand(member, aliases, bindings, generics, seen))
+                .collect::<Vec<_>>()
+                .join(" & ");
+        }
+        let key = if type_name.starts_with("$package") {
+            type_name.split('<').next().unwrap_or(type_name)
+        } else {
+            type_name
+        };
+        if let Some(expanded) = aliases.and_then(|aliases| resolve_alias(type_name, aliases))
+            && seen.insert(key.to_owned())
         {
-            let expanded = expand(&expanded, aliases, generics, seen);
-            seen.remove(type_name);
+            let expanded = expand(&expanded, aliases, bindings, generics, seen);
+            seen.remove(key);
             return expanded;
         }
         if let Some(body) = type_name
@@ -2747,17 +2783,17 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
                 .into_iter()
                 .map(|field| {
                     let Some((name, ty)) = split_once_top_level(field, ':') else {
-                        return expand(field, aliases, generics, seen);
+                        return expand(field, aliases, bindings, generics, seen);
                     };
                     let name = name.trim();
                     let name = if let Some(key) =
                         name.strip_prefix('[').and_then(|key| key.strip_suffix(']'))
                     {
-                        format!("[{}]", expand(key, aliases, generics, seen))
+                        format!("[{}]", expand(key, aliases, bindings, generics, seen))
                     } else {
                         name.to_owned()
                     };
-                    format!("{name}: {}", expand(ty, aliases, generics, seen))
+                    format!("{name}: {}", expand(ty, aliases, bindings, generics, seen))
                 })
                 .collect::<Vec<_>>();
             return format!("{{ {} }}", fields.join(", "));
@@ -2766,7 +2802,8 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
             && let Some(returns) = returns.trim().strip_prefix('>')
         {
             let mut nested_generics = generics.to_vec();
-            let parameters = parameters.trim();
+            let declaration_and_parameters = parameters.trim();
+            let parameters = declaration_and_parameters;
             let parameters = if let Some(declaration) = parameters
                 .strip_prefix('<')
                 .and_then(|value| value.find('>').map(|end| &value[..end + 1]))
@@ -2791,18 +2828,24 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
                             format!(
                                 "{}: {}",
                                 name.trim(),
-                                expand(ty, aliases, &nested_generics, seen)
+                                expand(ty, aliases, bindings, &nested_generics, seen)
                             )
                         } else {
-                            expand(parameter, aliases, &nested_generics, seen)
+                            expand(parameter, aliases, bindings, &nested_generics, seen)
                         }
                     })
                     .collect::<Vec<_>>();
                 return format!(
                     "{}({}) -> {}",
-                    parameters[..open].trim(),
+                    if bindings.is_some() {
+                        declaration_and_parameters
+                            [..declaration_and_parameters.len() - parameters.len() + open]
+                            .trim()
+                    } else {
+                        parameters[..open].trim()
+                    },
                     values.join(", "),
-                    expand(returns, aliases, &nested_generics, seen)
+                    expand(returns, aliases, bindings, &nested_generics, seen)
                 );
             }
         }
@@ -2811,7 +2854,7 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
                 "({})",
                 split_top_level(&type_name[1..type_name.len() - 1], ',')
                     .into_iter()
-                    .map(|part| expand(part, aliases, generics, seen))
+                    .map(|part| expand(part, aliases, bindings, generics, seen))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -2819,18 +2862,63 @@ fn expand_export_aliases(type_name: String, aliases: &HashMap<String, TypeAlias>
         if let Some((base, arguments)) = generic_type_parts(type_name) {
             return format!(
                 "{}<{}>",
-                base,
+                bindings
+                    .and_then(|bindings| bindings.get(base))
+                    .map_or(base, String::as_str),
                 arguments
                     .into_iter()
-                    .map(|argument| expand(argument, aliases, generics, seen))
+                    .map(|argument| expand(argument, aliases, bindings, generics, seen))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
         }
-        type_name.to_owned()
+        bindings
+            .and_then(|bindings| bindings.get(type_name))
+            .map_or(type_name, String::as_str)
+            .to_owned()
     }
 
-    expand(&type_name, aliases, &[], &mut HashSet::new())
+    expand(type_name, aliases, bindings, generics, &mut HashSet::new())
+}
+
+impl DeclarationSet {
+    fn ambient_signature(
+        &self,
+        overload: &super::declarations::DeclaredFunction,
+        context: Option<ExecutionContext>,
+    ) -> FunctionSignature {
+        let mut signature = overload.signature.clone();
+        if !overload.project
+            && overload.location.path.is_some()
+            && let Some(aliases) = self.package_aliases.get(&context)
+        {
+            let generics = &signature.generic_parameters;
+            for ty in signature
+                .parameters
+                .iter_mut()
+                .chain(signature.returns.fixed.iter_mut())
+                .chain(signature.returns.variadic.iter_mut())
+                .chain(signature.vararg.iter_mut())
+            {
+                *ty = bind_package_aliases(ty, aliases, generics);
+            }
+        }
+        signature
+    }
+
+    fn ambient_type(
+        &self,
+        global: &super::declarations::DeclaredGlobal,
+        context: Option<ExecutionContext>,
+    ) -> String {
+        if !global.project
+            && global.location.path.is_some()
+            && let Some(aliases) = self.package_aliases.get(&context)
+        {
+            return bind_package_aliases(&global.type_name, aliases, &[]);
+        }
+        global.type_name.clone()
+    }
 }
 
 #[cfg(test)]
@@ -2942,7 +3030,7 @@ pub(crate) fn check_with_imports(
                                 || overload.context.is_none()
                                 || overload.context == execution_context
                         })
-                        .map(|overload| overload.signature.clone())
+                        .map(|overload| declarations.ambient_signature(overload, execution_context))
                         .collect::<Vec<_>>(),
                 )
             })
@@ -2980,27 +3068,23 @@ pub(crate) fn check_with_imports(
                 .collect()
         }),
         global_types: {
+            let global_type = |global: &super::declarations::DeclaredGlobal| {
+                let ty = declarations.ambient_type(global, execution_context);
+                resolve_alias_chain(&ty, &checker_aliases).unwrap_or(ty)
+            };
             let mut globals = declarations
                 .globals
                 .iter()
-                .map(|(name, global)| {
-                    (
-                        name.clone(),
-                        resolve_alias_chain(&global.type_name, &checker_aliases)
-                            .unwrap_or_else(|| global.type_name.clone()),
-                    )
-                })
+                .map(|(name, global)| (name.clone(), global_type(global)))
                 .collect::<HashMap<_, _>>();
             if let Some(context) = execution_context
                 && let Some(scoped) = declarations.scoped_globals.get(&context)
             {
-                globals.extend(scoped.iter().map(|(name, global)| {
-                    (
-                        name.clone(),
-                        resolve_alias_chain(&global.type_name, &checker_aliases)
-                            .unwrap_or_else(|| global.type_name.clone()),
-                    )
-                }));
+                globals.extend(
+                    scoped
+                        .iter()
+                        .map(|(name, global)| (name.clone(), global_type(global))),
+                );
             }
             globals
         },
@@ -3016,6 +3100,11 @@ pub(crate) fn check_with_imports(
         diagnostics: Vec::new(),
     };
     checker.visit_ast(ast);
+    for diagnostic in &mut checker.diagnostics {
+        if diagnostic.message.contains("$package") {
+            diagnostic.message = display_package_aliases(&diagnostic.message);
+        }
+    }
     checker.diagnostics
 }
 
@@ -3167,7 +3256,7 @@ pub(crate) fn infer_module_export_type_context(
                             || overload.context.is_none()
                             || overload.context == context
                     })
-                    .map(|overload| overload.signature.clone())
+                    .map(|overload| declarations.ambient_signature(overload, context))
                     .collect(),
             )
         })
@@ -3175,13 +3264,13 @@ pub(crate) fn infer_module_export_type_context(
     checker.global_types = declarations
         .globals
         .iter()
-        .map(|(name, global)| (name.clone(), global.type_name.clone()))
+        .map(|(name, global)| (name.clone(), declarations.ambient_type(global, context)))
         .collect();
     if let Some(scoped) = context.and_then(|context| declarations.scoped_globals.get(&context)) {
         checker.global_types.extend(
             scoped
                 .iter()
-                .map(|(name, global)| (name.clone(), global.type_name.clone())),
+                .map(|(name, global)| (name.clone(), declarations.ambient_type(global, context))),
         );
     }
     checker.visit_ast(ast);
@@ -3219,6 +3308,13 @@ pub(crate) fn editor_unwrap_type(ty: &str) -> &str {
 }
 pub(crate) fn editor_type_fields(ty: &str) -> Vec<&str> {
     split_top_level_by(ty, &[',', ';'])
+}
+
+fn display_package_aliases(input: &str) -> String {
+    input
+        .replace("$package0_", "")
+        .replace("$package1_", "")
+        .replace("$package2_", "")
 }
 
 pub(crate) fn display_type(input: &str) -> String {
@@ -3264,5 +3360,9 @@ pub(crate) fn display_type(input: &str) -> String {
             render(&input[close + 1..], depth + 1)
         )
     }
-    render(input, 0)
+    if input.contains("$package") {
+        render(&display_package_aliases(input), 0)
+    } else {
+        render(input, 0)
+    }
 }
