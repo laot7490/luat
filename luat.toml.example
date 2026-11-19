@@ -8,13 +8,12 @@ description = 'A typed FiveM resource'
 # Compiler settings
 [compiler]
 out_dir = 'dist'
-declarations = ['types/fivem.d.luat']
 
 # FiveM resource manifest settings
 [fivem]
 fx_version = 'cerulean'
 game = 'gta5'
-shared = ['@ox_lib/init.lua', 'src/shared/config.luat']
+shared = ['@ox_lib/init.lua', 'src/types/index.d.luat', 'src/shared/config.luat']
 client = ['src/client/main.luat']
 server = ['@oxmysql/lib/MySQL.lua', 'src/server/main.luat']
 files = ['web/**']

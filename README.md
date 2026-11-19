@@ -51,24 +51,35 @@ The build writes the compiled scripts to `dist/` and creates `fxmanifest.lua` in
 
 ## Commands
 
-| Command                    | What it does                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------- |
-| `luat create [directory?]` | Creates starter project files in the current or a named directory.            |
-| `luat check`               | Checks the project's scripts and reports issues it finds.                     |
-| `luat build`               | Builds the scripts and FiveM resource manifest.                               |
-| `luat watch [directory?]`  | Builds the project and rebuilds it when source or configuration files change. |
-| `luat add <package>`       | Adds a community package to the project.                                      |
-| `luat install`             | Restores the package versions recorded in `luat.toml`.                        |
-| `luat update [package]`    | Updates dependencies within their declared version ranges.                    |
-| `luat package init <name>` | Creates a package with `luat-package.toml`.                                   |
-| `luat package check`       | Checks a package without installing dependencies.                             |
-| `luat remove <package>`    | Removes a package from the project.                                           |
+| Command                   | What it does                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| `luat create [name]`      | Prompts for settings and creates a project in the current or a named directory. |
+| `luat check`              | Checks the project's scripts and reports issues it finds.                       |
+| `luat build`              | Builds the scripts and FiveM resource manifest.                                 |
+| `luat watch [directory?]` | Builds the project and rebuilds it when source or configuration files change.   |
+| `luat add <package>`      | Adds a community package to the project.                                        |
+| `luat install`            | Restores the package versions recorded in `luat.toml`.                          |
+| `luat update [package]`   | Updates dependencies within their declared version ranges.                      |
+| `luat package init`       | Prompts for package settings and creates a package with `luat-package.toml`.    |
+| `luat package check`      | Checks a package without installing dependencies.                               |
+| `luat remove <package>`   | Removes a package from the project.                                             |
 
-Use `--project <directory>` with `check` or `build` to select a project in another directory. For example:
+Use `--project <directory>` with `check` or `build` to select a project in another directory.
 
 ## Project settings
 
 LuaT project settings are stored in `luat.toml`. The settings describe the resource and its shared, client, and server scripts. See [`luat.toml.example`](luat.toml.example) for the available options.
+
+List `.d.luat` files alongside scripts under `[fivem]`. LuaT uses them for type checking and omits them from the generated Lua and manifest.
+
+```toml
+[fivem]
+shared = ['src/types/index.d.luat', 'src/shared/init.luat']
+client = ['src/types/client.d.luat', 'src/client/main.luat']
+server = ['src/server/main.luat']
+```
+
+Shared declarations are visible on both sides. Client and server declarations are visible on their own side. A `typedef` in a regular source file takes precedence within that file. Project declarations take precedence over package declarations.
 
 ## Example syntax
 
@@ -95,8 +106,7 @@ local message = `Welcome, {name}! You are {status}.`
 
 ## Imports
 
-Use `import()` to share a local `.luat` module.
-Local imports works flawlessly with the FiveM's Asset Escrow system unlike traditional require systems.
+Use `import()` to share a local `.luat` module. LuaT orders listed scripts so imported dependencies run before their importers. A module reached only by `import()` is included automatically and runs on its first import. Missing modules, circular imports, and imports across incompatible execution sides are build errors.
 
 ```lua
 -- src/shared/settings.luat
@@ -128,20 +138,21 @@ luat install
 luat remove example
 ```
 
-Package declarations are available automatically after installation; no type import or extra declaration glob is needed. This includes runtime packages. Shared types work on both sides; client and server declarations stay in their matching context.
+Package declarations are available automatically after installation. Package authors assign `.d.luat` files to `shared`, `client`, or `server` in `luat-package.toml`.
 
 ```lua
-const player: LuaTExampleType = { id = 15 }
+-- src/client/main.luat
+const player: ExampleClientPlayer = { id = 15, displayName = 'Ada' }
 ```
 
 Load runtime modules explicitly and assign their returned API to a variable:
 
 ```lua
-local api = import('my-package')
-api.run()
+local example = import('example')
+example.print('Ada')
 ```
 
-Here `my-package` represents an installed runtime dependency. Re-exports such as `return import('./api')` remain supported. Declaration files describe types and ambient globals; they do not load runtime implementations. Packages are checked against their own declarations and dependency chain, independently of project-local declarations.
+Keep the package in `[dependencies]` and load its runtime modules with `import()`. Project script lists reject files inside `.luat/packages`. Packages are checked against their own declarations and dependency chain.
 
 The community registry is [luat-packages](https://github.com/laot7490/luat-packages). See the registry’s [contribution guide](https://github.com/laot7490/luat-packages/blob/main/CONTRIBUTING.md) for the walkthrough.
 
