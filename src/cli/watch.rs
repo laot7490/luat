@@ -60,44 +60,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     let mut declarations = Project::load(&folder)
         .map(|project| project.declaration_files().to_vec())
         .unwrap_or_default();
-    let mut watcher = notify::recommended_watcher(sender)
-        .map_err(|error| (2, format!("error LT5401: Could not start watcher: {error}")))?;
+    let mut watcher = notify::RecommendedWatcher::new(
+        sender,
+        notify::Config::default().with_follow_symlinks(false),
+    )
+    .map_err(|error| (2, format!("error LT5401: Could not start watcher: {error}")))?;
     watcher
-        .watch(&src, RecursiveMode::Recursive)
-        .map_err(|error| {
-            (
-                2,
-                format!("error LT5401: Could not watch {}: {error}", src.display()),
-            )
-        })?;
-    watcher
-        .watch(&config, RecursiveMode::NonRecursive)
-        .map_err(|error| {
-            (
-                2,
-                format!(
-                    "error LT5401: Could not watch {}: {error}",
-                    config.display()
-                ),
-            )
-        })?;
-    let managed = folder.join(".luat");
-    let mut managed_watched = managed.exists();
-    if managed_watched {
-        watcher
-            .watch(&managed, RecursiveMode::Recursive)
-            .map_err(|error| {
-                (
-                    2,
-                    format!(
-                        "error LT5401: Could not watch {}: {error}",
-                        managed.display()
-                    ),
-                )
-            })?;
-    }
-    watcher
-        .watch(&folder, RecursiveMode::NonRecursive)
+        .watch(&folder, RecursiveMode::Recursive)
         .map_err(|error| {
             (
                 2,
@@ -107,29 +76,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                 ),
             )
         })?;
-    let mut watched_declaration_directories = std::collections::HashSet::new();
-    for directory in declarations
-        .iter()
-        .filter_map(|path| path.parent())
-        .filter(|directory| {
-            *directory != folder && !directory.starts_with(&src) && !directory.starts_with(&managed)
-        })
-        .map(Path::to_path_buf)
-        .collect::<std::collections::HashSet<_>>()
-    {
-        watcher
-            .watch(&directory, RecursiveMode::NonRecursive)
-            .map_err(|error| {
-                (
-                    2,
-                    format!(
-                        "error LT5401: Could not watch {}: {error}",
-                        directory.display()
-                    ),
-                )
-            })?;
-        watched_declaration_directories.insert(directory);
-    }
     let path = super::render::display_path(&folder, None);
     let color = output::color_enabled(std::io::stdout().is_terminal());
     let path = super::render::paint(&path, super::render::Color::Muted, color);
@@ -146,39 +92,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
     loop {
         match receiver.recv() {
             Ok(Ok(event)) if relevant(&event, &src, &config, &declarations) => {
-                if managed_watched
-                    && event.paths.iter().any(|path| path == &managed)
-                    && matches!(event.kind, EventKind::Remove(_))
-                {
-                    let _ = watcher.unwatch(&managed);
-                    managed_watched = false;
-                }
-                if !managed_watched && managed.is_dir() {
-                    watcher
-                        .watch(&managed, RecursiveMode::Recursive)
-                        .map_err(|error| {
-                            (
-                                2,
-                                format!(
-                                    "error LT5401: Could not watch {}: {error}",
-                                    managed.display()
-                                ),
-                            )
-                        })?;
-                    managed_watched = true;
-                }
                 let mut changed = true;
                 while changed {
                     changed = false;
                     match receiver.recv_timeout(DEBOUNCE) {
                         Ok(Ok(next)) if relevant(&next, &src, &config, &declarations) => {
-                            if managed_watched
-                                && next.paths.iter().any(|path| path == &managed)
-                                && matches!(next.kind, EventKind::Remove(_))
-                            {
-                                let _ = watcher.unwatch(&managed);
-                                managed_watched = false;
-                            }
                             changed = true
                         }
                         Ok(Ok(_)) => {}
@@ -190,20 +108,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                             return Err((2, "error LT5401: Filesystem watcher stopped".to_owned()));
                         }
                     }
-                }
-                if !managed_watched && managed.is_dir() {
-                    watcher
-                        .watch(&managed, RecursiveMode::Recursive)
-                        .map_err(|error| {
-                            (
-                                2,
-                                format!(
-                                    "error LT5401: Could not watch {}: {error}",
-                                    managed.display()
-                                ),
-                            )
-                        })?;
-                    managed_watched = true;
                 }
                 if !src.is_dir() {
                     return Err((
@@ -218,30 +122,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                 build(project.as_ref(), &mut session, &mut warnings, pretty);
                 if let Ok(project) = project {
                     declarations = project.declaration_files().to_vec();
-                    for directory in declarations
-                        .iter()
-                        .filter_map(|path| path.parent())
-                        .filter(|directory| {
-                            *directory != folder
-                                && !directory.starts_with(&src)
-                                && !directory.starts_with(&managed)
-                        })
-                        .map(Path::to_path_buf)
-                    {
-                        if watched_declaration_directories.insert(directory.clone()) {
-                            watcher
-                                .watch(&directory, RecursiveMode::NonRecursive)
-                                .map_err(|error| {
-                                    (
-                                        2,
-                                        format!(
-                                            "error LT5401: Could not watch {}: {error}",
-                                            directory.display()
-                                        ),
-                                    )
-                                })?;
-                        }
-                    }
                 }
             }
             Ok(Ok(_)) => {}
@@ -412,18 +292,32 @@ fn relevant(event: &Event, src: &Path, config: &Path, declarations: &[PathBuf]) 
                         .join(".luat"),
                 )
                 || declarations.iter().any(|declaration| {
-                    path == declaration
-                        || (structural
-                            && path.parent() == declaration.parent()
-                            && path
-                                .file_name()
-                                .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat")))
+                    path == declaration || structural && declaration.starts_with(path)
                 })
                 || path.starts_with(src)
                     && (path
                         .extension()
                         .is_some_and(|extension| extension == "luat" || extension == "lua")
                         || structural && path.extension().is_none())
+                || structural && declaration_tree(path)
+        })
+}
+
+fn declaration_tree(path: &Path) -> bool {
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
+    {
+        return true;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_dir()
+        && std::fs::read_dir(path).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| declaration_tree(&entry.path()))
         })
 }
 
@@ -492,9 +386,30 @@ mod tests {
         let declaration = PathBuf::from("project/types/api.d.luat");
         event.paths = vec![declaration.clone()];
         assert!(relevant(&event, src, config, &[declaration]));
+        event.paths = vec![PathBuf::from("project/types/new/nested/api.d.luat")];
+        assert!(relevant(&event, src, config, &[]));
         event.paths = vec![PathBuf::from(
             "project/.luat/packages/@types/example/1.0.0/client.d.luat",
         )];
         assert!(relevant(&event, src, config, &[]));
+    }
+
+    #[test]
+    fn notices_declarations_in_a_moved_directory() {
+        let root = env::current_dir()
+            .unwrap()
+            .join("target/tests/watch-moved-declarations");
+        let moved = root.join("types/new");
+        fs::create_dir_all(&moved).unwrap();
+        let mut event = Event::new(EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::To,
+        )));
+        event.paths.push(moved.clone());
+        let src = root.join("src");
+        let config = root.join("luat.toml");
+        assert!(!relevant(&event, &src, &config, &[]));
+        fs::write(moved.join("api.d.luat"), "typedef Api = string").unwrap();
+        assert!(relevant(&event, &src, &config, &[]));
+        fs::remove_dir_all(root).unwrap();
     }
 }
