@@ -652,6 +652,10 @@ fn checks_imported_table_function_and_reexport_signatures() {
         ),
         (
             "src/shared/api.luat",
+            "local function printGreeting(name: string): () end\nreturn { Print = printGreeting }",
+        ),
+        (
+            "src/shared/api.luat",
             "local api = {}\napi.Print = function(status: 'info' | 'warning', message: string) end\nreturn api",
         ),
         (
@@ -676,7 +680,11 @@ fn checks_imported_table_function_and_reexport_signatures() {
             .unwrap();
             "cfg.Print('random', 'message')"
         } else if call.contains("Print") {
-            "cfg.Print('random', 'message')"
+            if call.contains("printGreeting") {
+                "cfg.Print(1)"
+            } else {
+                "cfg.Print('random', 'message')"
+            }
         } else {
             "cfg('random', 'message')"
         };
@@ -701,7 +709,11 @@ fn checks_imported_table_function_and_reexport_signatures() {
         assert_eq!(check_diagnostic.code, "LT2002");
         assert_eq!(
             &main_source[check_diagnostic.source_range.clone()],
-            "'random'"
+            if call.contains("printGreeting") {
+                "1"
+            } else {
+                "'random'"
+            }
         );
         assert_eq!(
             fs::read_to_string(root.join("dist/client/main.lua")).unwrap(),

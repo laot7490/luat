@@ -1430,6 +1430,9 @@ impl Visitor for TypeChecker<'_> {
         let mut collector = FunctionCollector::default();
         collector.add_ast(name.clone(), node.body());
         if let Some(signature) = collector.functions.remove(&name) {
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.insert(name.clone(), signature.type_name());
+            }
             let previous = self.functions.insert(name.clone(), signature);
             if let Some(scope) = self.function_scope_changes.last_mut() {
                 scope.push((name.clone(), previous));
