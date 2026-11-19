@@ -1,10 +1,14 @@
-use luat::{BuildError, Project};
-use std::{env, io::IsTerminal, path::PathBuf, time::Instant};
+use luat::{BuildError, BuildProgress, BuildStage, Project, output};
+use std::{
+    env,
+    io::{IsTerminal, Write},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 mod create;
 mod render;
 mod watch;
-use render::{Color, paint};
 
 fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
@@ -15,18 +19,18 @@ pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
         .first()
         .is_some_and(|arg| arg == "--version" || arg == "-V")
     {
-        println!("\nluat {}", env!("CARGO_PKG_VERSION"));
+        println!("luat {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        println!("\n{}", usage());
+        println!("{}", usage());
         return Ok(());
     }
     let Some(command) = args.first().map(String::as_str) else {
-        println!("\n{}", usage());
+        println!("{}", usage());
         return Ok(());
     };
     if command == "package"
@@ -81,14 +85,18 @@ pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .to_path_buf()
         };
+        let diagnostic_root = std::path::absolute(&root).ok();
         luat::packages::author::check_package(&root).map_err(|error| {
             let code = match &error {
                 BuildError::Compile { .. } | BuildError::CompileMany(_) => 1,
                 _ => 2,
             };
-            (code, render::render_build_error(&error, pretty))
+            (
+                code,
+                render::render_build_error(&error, pretty, "Check", diagnostic_root.as_deref()),
+            )
         })?;
-        println!("Success: Checked package in {}", root.display());
+        output::status("SUCCESS", &format!("Checked package in {}", root.display()));
         return Ok(());
     }
     if command == "create" {
@@ -101,14 +109,12 @@ pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
         return watch::run(&args[1..]);
     }
     if matches!(command, "add" | "install" | "update" | "remove") {
-        let mut package_args = vec![command.to_owned()];
-        package_args.extend_from_slice(&args[1..]);
-        return luat::packages::run(&package_args);
+        return luat::packages::run(&args);
     }
     if !matches!(command, "check" | "build") {
         return Err((
             2,
-            format!("error LT5001: Unknown command '{command}'\n\n{}", usage()),
+            format!("error LT5001: Unknown command '{command}'\n{}", usage()),
         ));
     }
     let mut project_path = PathBuf::from(".");
@@ -143,88 +149,166 @@ pub(crate) fn run(args: Vec<String>) -> Result<(), (u8, String)> {
             ),
         ));
     }
-    let project = Project::load(project_path)
-        .map_err(|error| (2, render::render_build_error(&error, pretty)))?;
-    run_project(command, project, pretty)
+    let started = Instant::now();
+    let project = Project::load(project_path).map_err(|error| {
+        (
+            2,
+            render::render_build_error(
+                &error,
+                pretty,
+                if command == "check" { "Check" } else { "Build" },
+                config_path.parent(),
+            ),
+        )
+    })?;
+    run_project(command, project, pretty, started)
 }
 
-fn run_project(command: &str, project: Project, pretty: bool) -> Result<(), (u8, String)> {
-    run_project_with(&project, pretty, || {
-        if command == "check" {
-            project.check()
-        } else {
-            project.build()
-        }
-    })
-}
-
-fn run_project_with(
-    project: &Project,
+fn run_project(
+    command: &str,
+    project: Project,
     pretty: bool,
-    run: impl FnOnce() -> Result<luat::BuildResult, BuildError>,
+    started: Instant,
 ) -> Result<(), (u8, String)> {
     for warning in project.warnings() {
-        eprintln!(
-            "\n{} {warning}",
-            paint(
-                "warning:",
-                Color::Yellow,
-                pretty && std::io::stderr().is_terminal()
-            )
-        );
+        output::warning(warning);
     }
-    let started = Instant::now();
-    let result = run();
-    let result = result.map_err(|error| match error {
-        BuildError::Compile { path, error } => {
-            let code = if is_internal_error(&error) { 2 } else { 1 };
-            (code, render::render_errors(&[(path, error)], pretty))
-        }
-        BuildError::CompileMany(errors) => {
-            let code = if errors.iter().any(|(_, error)| is_internal_error(error)) {
-                2
-            } else {
-                1
-            };
-            (code, render::render_errors(&errors, pretty))
-        }
-        error => (2, render::render_build_error(&error, pretty)),
-    })?;
-    if let Some(output_dir) = result.output_dir {
-        println!(
-            "\n{}",
-            paint(
-                &format!(
-                    "Success: Build completed in {}ms",
-                    started.elapsed().as_millis()
-                ),
-                Color::Success,
-                pretty && std::io::stdout().is_terminal()
-            )
-        );
-        println!(
-            "  {} {} compiled",
-            result.compiled_files,
-            plural(result.compiled_files, "file", "files")
-        );
-        println!("  Output: {}", output_dir.display());
+    let result = if command == "check" {
+        project.check()
     } else {
+        production_build(&project)
+    }
+    .map_err(|error| {
+        project_error(
+            &error,
+            pretty,
+            if command == "check" { "Check" } else { "Build" },
+            Some(project.root()),
+        )
+    })?;
+    let count = result.compiled_files;
+    let files = plural(count, "file", "files");
+    if result.output_dir.is_some() {
+        let modules = plural(count, "module", "modules");
+        let color = output::color_enabled(std::io::stdout().is_terminal());
         println!(
-            "\n{}",
-            paint(
-                &format!(
-                    "Success: Checked {} source {} and {} {}",
-                    result.compiled_files,
-                    plural(result.compiled_files, "file", "files"),
-                    result.declaration_files,
-                    plural(result.declaration_files, "declaration", "declarations")
-                ),
-                Color::Success,
-                pretty && std::io::stdout().is_terminal()
+            "{}",
+            render::paint(
+                &format!("✓ {count} {modules} transformed."),
+                render::Color::Success,
+                color
             )
         );
+        println!(
+            "{}",
+            render::paint(
+                &format!("✓ built in {}", build_duration(started.elapsed())),
+                render::Color::Success,
+                color
+            )
+        );
+    } else {
+        let mut message = format!("Checked {count} source {files}");
+        let declarations = result.declaration_files;
+        if declarations > 0 {
+            let label = plural(declarations, "declaration", "declarations");
+            message.push_str(&format!(" and {declarations} {label}"));
+        }
+        output::status("SUCCESS", &format!("{message}."));
     }
     Ok(())
+}
+
+fn project_error(
+    error: &BuildError,
+    pretty: bool,
+    action: &str,
+    root: Option<&Path>,
+) -> (u8, String) {
+    let code = match error {
+        BuildError::Compile { error, .. } if !is_internal_error(error) => 1,
+        BuildError::CompileMany(errors)
+            if !errors.iter().any(|(_, error)| is_internal_error(error)) =>
+        {
+            1
+        }
+        _ => 2,
+    };
+    (
+        code,
+        render::render_build_error(error, pretty, action, root),
+    )
+}
+
+fn production_build(project: &Project) -> Result<luat::BuildResult, BuildError> {
+    output::status("INFO", "Building for production...");
+    let interactive = std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
+    let mut last = None;
+    let result = project.build_with_file_progress(&mut luat::BuildSession::default(), |event| {
+        if !interactive {
+            return;
+        }
+        let (phase, path) = match event {
+            BuildProgress::Analyzing(path) => ("analyzing", path),
+            BuildProgress::Transforming(path) => ("transforming", path),
+            BuildProgress::Stage(BuildStage::Finalize) => {
+                if last.take().is_some() {
+                    let _ = clear_progress_line();
+                }
+                return;
+            }
+            BuildProgress::Stage(_) => return,
+        };
+        if last.is_some_and(|(previous, time): (&str, Instant)| {
+            previous == phase && time.elapsed() < Duration::from_millis(50)
+        }) {
+            return;
+        }
+        let _ = clear_progress_line();
+        let row = format!(
+            "{phase} {}",
+            render::display_path(path, Some(project.root()))
+        );
+        let row = truncate_progress(&row, 119);
+        let _ = write!(
+            std::io::stderr(),
+            "\r\x1b[2K{}",
+            render::paint(&row, render::Color::Muted, true)
+        );
+        last = Some((phase, Instant::now()));
+    });
+    if last.is_some() {
+        let _ = clear_progress_line();
+    }
+    result
+}
+
+fn clear_progress_line() -> std::io::Result<()> {
+    use std::io::Write;
+    let mut stderr = std::io::stderr().lock();
+    stderr.write_all(b"\r\x1b[2K")?;
+    stderr.flush()
+}
+
+fn truncate_progress(row: &str, width: usize) -> String {
+    if row.chars().count() <= width {
+        row.to_owned()
+    } else {
+        let mut truncated = row
+            .chars()
+            .take(width.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+}
+
+fn build_duration(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{:.2}s", duration.as_secs_f64())
+    }
 }
 
 fn is_internal_error(error: &luat::CompileError) -> bool {
@@ -286,6 +370,13 @@ mod cleanup_tests {
             assert!(message.contains(&format!("error {expected}:")), "{message}");
             assert!(!message.contains('\u{1b}'), "{message}");
         }
+    }
+
+    #[test]
+    fn formats_build_duration_in_milliseconds_or_seconds() {
+        use std::time::Duration;
+        assert_eq!(super::build_duration(Duration::from_millis(999)), "999ms");
+        assert_eq!(super::build_duration(Duration::from_millis(8_400)), "8.40s");
     }
 
     #[test]

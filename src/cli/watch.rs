@@ -1,11 +1,12 @@
 use std::{
     env,
+    io::IsTerminal,
     path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
 };
 
-use luat::Project;
+use luat::{OutputChange, Project, output};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -24,6 +25,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
             })?
             .join(folder)
     };
+    let folder: PathBuf = folder.components().collect();
     if !folder.is_dir() {
         return Err((
             2,
@@ -128,12 +130,18 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
             })?;
         watched_declaration_directories.insert(directory);
     }
-    println!(
-        "\nSuccess: Watching {} for source and configuration changes",
-        folder.display()
-    );
+    let path = super::render::display_path(&folder, None);
+    let color = output::color_enabled(std::io::stdout().is_terminal());
+    let path = super::render::paint(&path, super::render::Color::Muted, color);
+    output::status("INFO", &format!("Watching {path}"));
     let mut session = luat::BuildSession::default();
-    build(Project::load(&folder).as_ref(), &mut session, pretty);
+    let mut warnings = Vec::new();
+    build(
+        Project::load(&folder).as_ref(),
+        &mut session,
+        &mut warnings,
+        pretty,
+    );
 
     loop {
         match receiver.recv() {
@@ -207,7 +215,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
                     ));
                 }
                 let project = Project::load(&folder);
-                build(project.as_ref(), &mut session, pretty);
+                build(project.as_ref(), &mut session, &mut warnings, pretty);
                 if let Ok(project) = project {
                     declarations = project.declaration_files().to_vec();
                     for directory in declarations
@@ -248,15 +256,101 @@ pub(crate) fn run(args: &[String]) -> Result<(), (u8, String)> {
 fn build(
     project: Result<&Project, &luat::BuildError>,
     session: &mut luat::BuildSession,
+    warnings: &mut Vec<String>,
     pretty: bool,
 ) {
-    let result = project
-        .map_err(|error| (2, super::render::render_build_error(error, pretty)))
+    let changes = project
+        .map_err(|error| super::project_error(error, pretty, "Build", None))
         .and_then(|project| {
-            super::run_project_with(project, pretty, || project.build_with_session(session))
+            for warning in project.warnings() {
+                if !warnings.contains(warning) {
+                    output::warning(warning);
+                }
+            }
+            warnings.clear();
+            warnings.extend_from_slice(project.warnings());
+            project.build_for_watch(session).map_err(|error| {
+                super::project_error(&error, pretty, "Build", Some(project.root()))
+            })
         });
-    if let Err((_, message)) = result {
-        eprintln!("\n{}", luat::output::stderr_message(&message));
+    match changes {
+        Ok(changes) => print_changes(changes),
+        Err((_, message)) => {
+            eprintln!("{}", output::stderr_message(&message));
+        }
+    }
+}
+
+fn print_changes(changes: Vec<OutputChange>) {
+    if changes.is_empty() {
+        return;
+    }
+    use super::render::{Color, display_path, paint};
+    let color = output::color_enabled(std::io::stdout().is_terminal());
+    let time = paint(&local_time(), Color::Muted, color);
+    let tag = if color {
+        "\x1b[1;38;2;157;130;241m[luat]\x1b[0m"
+    } else {
+        "[luat]"
+    };
+    let mut groups = [Vec::new(), Vec::new(), Vec::new()];
+    for change in changes {
+        let (index, path) = match change {
+            OutputChange::Added(path) => (0, path),
+            OutputChange::Updated(path) => (1, path),
+            OutputChange::Removed(path) => (2, path),
+        };
+        groups[index].push(display_path(&path, None));
+    }
+    for (action, mut paths) in ["add", "update", "remove"].into_iter().zip(groups) {
+        if paths.is_empty() {
+            continue;
+        }
+        paths.sort_unstable();
+        let paths = paths
+            .iter()
+            .map(|path| {
+                if let Some((directory, file)) = path.rsplit_once('/') {
+                    format!(
+                        "{}{file}",
+                        paint(&format!("{directory}/"), Color::Muted, color)
+                    )
+                } else {
+                    path.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{time} {tag} {} {paths}",
+            paint(action, Color::Success, color)
+        );
+    }
+}
+
+#[cfg(windows)]
+fn local_time() -> String {
+    use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetLocalTime};
+    let mut time = std::mem::MaybeUninit::<SYSTEMTIME>::uninit();
+    // GetLocalTime initializes the supplied SYSTEMTIME.
+    let time = unsafe {
+        GetLocalTime(time.as_mut_ptr());
+        time.assume_init()
+    };
+    format!("{:02}:{:02}:{:02}", time.wHour, time.wMinute, time.wSecond)
+}
+
+#[cfg(unix)]
+fn local_time() -> String {
+    let mut local = std::mem::MaybeUninit::uninit();
+    // localtime_r writes the calendar time into local on success.
+    unsafe {
+        let seconds = libc::time(std::ptr::null_mut());
+        if libc::localtime_r(&seconds, local.as_mut_ptr()).is_null() {
+            return "--:--:--".into();
+        }
+        let time = local.assume_init();
+        format!("{:02}:{:02}:{:02}", time.tm_hour, time.tm_min, time.tm_sec)
     }
 }
 

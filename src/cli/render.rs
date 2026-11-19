@@ -1,12 +1,16 @@
 use luat::{BuildError, Diagnostic};
-use std::{env, io::IsTerminal, path::PathBuf};
+use std::{
+    env,
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy)]
 pub(super) enum Color {
     Error,
     Success,
-    Cyan,
+    Blue,
     Yellow,
     Muted,
 }
@@ -18,41 +22,90 @@ pub(super) fn paint(text: &str, color: Color, enabled: bool) -> String {
     let code = match color {
         Color::Error => "31",
         Color::Success => "32",
-        Color::Cyan => "36",
+        Color::Blue => "34",
         Color::Yellow => "33",
         Color::Muted => "90",
     };
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
-pub(super) fn render_build_error(error: &BuildError, pretty: bool) -> String {
+pub(super) fn render_build_error(
+    error: &BuildError,
+    pretty: bool,
+    action: &str,
+    root: Option<&Path>,
+) -> String {
     match error {
         BuildError::Io { path, source } => format!(
             "error LT5301: Could not access {}: {source}",
-            path.display()
+            display_path(path, root)
         ),
         BuildError::Configuration { path, message } => {
             format!(
                 "error LT5101: Invalid configuration in {}: {message}",
-                path.display()
+                display_path(path, root)
             )
         }
         BuildError::Compile { path, error } => {
-            render_errors(&[(path.clone(), error.clone())], pretty).to_string()
+            render_failure(&[(path.clone(), error.clone())], pretty, action, root)
         }
-        BuildError::CompileMany(errors) => render_errors(errors, pretty).to_string(),
+        BuildError::CompileMany(errors) => render_failure(errors, pretty, action, root),
     }
 }
 
-pub(super) fn render_errors(errors: &[(PathBuf, luat::CompileError)], pretty: bool) -> String {
-    let color = pretty && std::io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none();
-    let mut rendered = Vec::new();
-    let count = errors
+fn render_failure(
+    errors: &[(PathBuf, luat::CompileError)],
+    pretty: bool,
+    action: &str,
+    root: Option<&Path>,
+) -> String {
+    let count: usize = errors
         .iter()
         .map(|(_, error)| error.diagnostics.len())
-        .sum::<usize>();
+        .sum();
+    let files = errors
+        .iter()
+        .map(|(path, _)| path)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let error_word = super::plural(count, "error", "errors");
+    let file_word = super::plural(files, "file", "files");
+    let summary = luat::output::log_line(
+        "ERROR",
+        &format!("{action} failed with {count} {error_word} in {files} {file_word}."),
+        std::io::stderr().is_terminal(),
+    );
+    let details = render_errors_at(errors, pretty, root);
+    if details.is_empty() {
+        summary
+    } else {
+        format!("{summary}\n{details}")
+    }
+}
+
+#[cfg(test)]
+fn render_errors(errors: &[(PathBuf, luat::CompileError)], pretty: bool) -> String {
+    render_errors_at(errors, pretty, None)
+}
+
+pub(super) fn display_path(path: &Path, root: Option<&Path>) -> String {
+    root.and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn render_errors_at(
+    errors: &[(PathBuf, luat::CompileError)],
+    pretty: bool,
+    root: Option<&Path>,
+) -> String {
+    let color = pretty && std::io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none();
+    let mut rendered = Vec::new();
     for (path, error) in errors {
         let source = std::fs::read_to_string(path);
+        let shown = PathBuf::from(display_path(path, root));
+        let path = &shown;
         for diagnostic in &error.diagnostics {
             let file_level = diagnostic.source_range.is_empty()
                 && matches!(diagnostic.code, "LT9001" | "LT9003");
@@ -90,19 +143,6 @@ pub(super) fn render_errors(errors: &[(PathBuf, luat::CompileError)], pretty: bo
             });
         }
     }
-    if pretty {
-        let error_word = if count == 1 { "error" } else { "errors" };
-        let files = errors
-            .iter()
-            .map(|(path, _)| path)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        let file_word = if files == 1 { "file" } else { "files" };
-        rendered.push(format!(
-            "Found {count} {error_word} in {} {file_word}.",
-            files
-        ));
-    }
     rendered.join(if pretty { "\n\n" } else { "\n" })
 }
 
@@ -135,16 +175,11 @@ fn render_diagnostic(
     let underline = "~".repeat(highlight_width);
     let number_width = line_number.to_string().len().max(4);
     let header = format!(
-        "{} {}: {}\n  {} {}:{}:{}",
-        paint("error", Color::Error, color),
-        paint(diagnostic.code, Color::Muted, color),
-        diagnostic.message,
-        paint("-->", Color::Cyan, color),
-        paint(&path.display().to_string(), Color::Cyan, color),
-        line_number,
-        column
+        "{} - {}",
+        diagnostic_location(path, line_number, column, color),
+        diagnostic_message(diagnostic, color),
     );
-    let gutter = paint("|", Color::Muted, color);
+    let gutter = "|";
     let code_line = format!("{line_number:>number_width$} {gutter} {expanded}");
     let marker = format!(
         "{} {gutter} {}{}",
@@ -157,34 +192,42 @@ fn render_diagnostic(
         " ".repeat(number_width)
     )
 }
-fn render_file_diagnostic(path: &std::path::Path, diagnostic: &Diagnostic, color: bool) -> String {
+fn diagnostic_location(path: &Path, line: usize, column: usize, color: bool) -> String {
+    let path = paint(&path.to_string_lossy(), Color::Blue, color);
+    let separator = paint(":", Color::Muted, color);
+    let line = paint(&line.to_string(), Color::Yellow, color);
+    let column = paint(&column.to_string(), Color::Yellow, color);
+    format!("{path}{separator}{line}{separator}{column}")
+}
+
+fn diagnostic_message(diagnostic: &Diagnostic, color: bool) -> String {
+    let code = paint(&format!("{}:", diagnostic.code), Color::Muted, color);
+    format!("{code} {}", diagnostic.message)
+}
+
+fn render_file_diagnostic(path: &Path, diagnostic: &Diagnostic, color: bool) -> String {
     format!(
-        "{} - {} {}: {}",
-        paint(&path.display().to_string(), Color::Cyan, color),
-        paint("error", Color::Error, color),
-        paint(diagnostic.code, Color::Muted, color),
-        diagnostic.message
+        "{} - {}",
+        paint(&path.to_string_lossy(), Color::Blue, color),
+        diagnostic_message(diagnostic, color)
     )
 }
 
 fn render_unavailable_diagnostic(
-    path: &std::path::Path,
+    path: &Path,
     diagnostic: &Diagnostic,
     error: &str,
     color: bool,
 ) -> String {
     format!(
-        "{}:{}:{} - {} {}: {}\nSource unavailable: {error}",
-        paint(&path.display().to_string(), Color::Cyan, color),
-        paint(&diagnostic.location.line.to_string(), Color::Yellow, color),
-        paint(
-            &diagnostic.location.column.to_string(),
-            Color::Yellow,
+        "{} - {}\nSource unavailable: {error}",
+        diagnostic_location(
+            path,
+            diagnostic.location.line,
+            diagnostic.location.column,
             color
         ),
-        paint("error", Color::Error, color),
-        paint(diagnostic.code, Color::Muted, color),
-        diagnostic.message
+        diagnostic_message(diagnostic, color),
     )
 }
 
@@ -353,7 +396,11 @@ mod tests {
                 message: "missing field".to_owned(),
             }],
         };
-        let rendered = render_errors(&[(path.clone(), error)], false);
+        let rendered = super::render_errors_at(&[(path.clone(), error)], false, path.parent());
+        assert!(
+            rendered.starts_with(&path.file_name().unwrap().to_string_lossy().into_owned()),
+            "{rendered}"
+        );
         let _ = std::fs::remove_file(&path);
 
         assert!(rendered.contains(":2:17: error LT2001"), "{rendered}");

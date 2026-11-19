@@ -44,23 +44,56 @@ pub fn style_message(message: &str, color: bool) -> String {
         .join("\n")
 }
 
+pub fn color_enabled(terminal: bool) -> bool {
+    pretty() && terminal && std::env::var_os("NO_COLOR").is_none()
+}
+
+pub fn log_line(level: &str, message: &str, terminal: bool) -> String {
+    let tag = concat!("luat v", env!("CARGO_PKG_VERSION"));
+    if color_enabled(terminal) {
+        let color = match level {
+            "ERROR" => 31,
+            "WARNING" => 33,
+            "SUCCESS" => 32,
+            _ => return format!("\x1b[1;38;2;157;130;241m{tag}\x1b[0m {message}"),
+        };
+        format!("\x1b[1;38;2;157;130;241m{tag}\x1b[0m \x1b[{color}m{message}\x1b[0m")
+    } else {
+        format!("{tag} {message}")
+    }
+}
+
+pub fn status(level: &str, message: &str) {
+    println!(
+        "{}",
+        log_line(level, message, std::io::stdout().is_terminal())
+    );
+}
+
 pub fn stderr_message(message: &str) -> String {
+    let message = message.trim();
+    let terminal = std::io::stderr().is_terminal();
+    if let Some(message) = message.strip_prefix("error ") {
+        return log_line("ERROR", message, terminal);
+    }
+    if let Some(message) = message.strip_prefix("warning ") {
+        return log_line("WARNING", message, terminal);
+    }
     style_message(
         message,
         pretty() && std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
     )
 }
 
-pub(crate) fn warning(message: &str) {
-    eprintln!("\n{} {message}", paint("warning:", "33"));
+pub fn warning(message: &str) {
+    stderr("WARNING", message);
 }
 
-pub(crate) fn paint(text: &str, color: &str) -> String {
-    if pretty() && std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-        format!("\x1b[{color}m{text}\x1b[0m")
-    } else {
-        text.to_owned()
-    }
+pub fn stderr(level: &str, message: &str) {
+    eprintln!(
+        "{}",
+        log_line(level, message, std::io::stderr().is_terminal())
+    );
 }
 
 #[cfg(test)]
