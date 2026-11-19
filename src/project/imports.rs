@@ -249,6 +249,32 @@ fn output_path_for(id: &str, out_dir: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn ordered_entries<'a>(
+    paths: &'a [String],
+    modules: &BTreeMap<String, Module>,
+) -> Result<Vec<&'a str>, BuildError> {
+    let explicit: HashMap<_, _> = paths
+        .iter()
+        .filter_map(|path| entry_id(path).map(|id| (id, path.as_str())))
+        .collect();
+    let mut complete = HashSet::new();
+    let mut dependencies = Vec::new();
+    let mut entries = Vec::new();
+    for path in paths {
+        if let Some(id) = entry_id(path).filter(|id| modules.contains_key(*id)) {
+            visit_cycle(id, modules, &mut complete, &mut dependencies)?;
+            entries.extend(
+                dependencies
+                    .drain(..)
+                    .filter_map(|id| explicit.get(id.as_str()).copied()),
+            );
+        } else {
+            entries.push(path);
+        }
+    }
+    Ok(entries)
+}
+
 impl Project {
     #[cfg(test)]
     pub(super) fn analyze_imports(&self) -> Result<ImportPlan, BuildError> {
@@ -344,6 +370,7 @@ impl Project {
                             message,
                         }
                     })?;
+                originals[side].retain(|path| !manifest::is_declaration_path(path));
             }
         }
         if self.package_root {
@@ -656,7 +683,7 @@ impl Project {
                     scripts[side].push(output_path_for(id, out_dir));
                 }
             }
-            for path in original_paths {
+            for path in ordered_entries(original_paths, &modules)? {
                 if let Some(id) = entry_id(path) {
                     if modules
                         .get(id)
@@ -675,7 +702,7 @@ impl Project {
                         scripts[side].push(output_path_for(id, out_dir));
                     }
                 } else {
-                    scripts[side].push(path.clone());
+                    scripts[side].push(path.to_owned());
                 }
             }
         }

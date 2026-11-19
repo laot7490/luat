@@ -188,7 +188,7 @@ fn declaration_files_cannot_silently_drop_runtime_code() {
     .unwrap();
     fs::write(
         root.join("luat.toml"),
-        "[project]\nname='test'\n[compiler]\ndeclarations=['types/api.d.luat']\n",
+        "[project]\nname='test'\n[fivem]\nshared=['types/*.d.luat']\n",
     )
     .unwrap();
     let project = Project::load(&root).unwrap();
@@ -201,6 +201,9 @@ fn declaration_files_cannot_silently_drop_runtime_code() {
     );
     fs::write(root.join("types/api.d.luat"), "typedef PlayerId = number\n").unwrap();
     assert!(project.check().is_ok());
+    assert_eq!(project.build().unwrap().compiled_files, 0);
+    let manifest = fs::read_to_string(root.join("fxmanifest.lua")).unwrap();
+    assert!(!manifest.contains("api.d.luat") && !manifest.contains("api.d.lua"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -232,18 +235,18 @@ fn client_context_rejects_server_only_natives() {
 }
 
 #[test]
-fn declaration_context_tags_scope_aliases_and_globals() {
+fn manifest_scopes_declaration_aliases_and_globals() {
     let root = temp_project();
     fs::create_dir_all(root.join("src/client")).unwrap();
     fs::create_dir_all(root.join("types")).unwrap();
     fs::write(
         root.join("types/client.d.luat"),
-        "---@client\ntypedef PlatformValueType = string\ndeclare PlatformValue: PlatformValueType",
+        "typedef PlatformValueType = string\ndeclare PlatformValue: PlatformValueType",
     )
     .unwrap();
     fs::write(
         root.join("types/server.d.luat"),
-        "---@server\ntypedef PlatformValueType = number\ndeclare PlatformValue: PlatformValueType",
+        "typedef PlatformValueType = number\ndeclare PlatformValue: PlatformValueType",
     )
     .unwrap();
     fs::write(
@@ -251,7 +254,7 @@ fn declaration_context_tags_scope_aliases_and_globals() {
         "local value: string = PlatformValue",
     )
     .unwrap();
-    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n").unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[fivem]\nclient=['types/client.d.luat', 'src/client/main.luat']\nserver=['types/server.d.luat']\n").unwrap();
 
     let result = Project::load(&root).unwrap().check();
     assert!(result.is_ok(), "{result:?}");
@@ -262,12 +265,16 @@ fn declaration_context_tags_scope_aliases_and_globals() {
     .unwrap();
     fs::write(
         root.join("types/server.d.luat"),
-        "---@server\ndeclare PlatformServerValue: number",
+        "declare PlatformServerValue: number",
     )
     .unwrap();
     let error = Project::load(&root).unwrap().check().unwrap_err();
     assert_eq!(main_diagnostic(&error).1.code, "LT2010");
-    fs::write(root.join("types/server.d.luat"), "---@server\ndeclare ServerApi: { value: number, call: () -> () }\nfunction ServerCallback() end").unwrap();
+    fs::write(
+        root.join("types/server.d.luat"),
+        "declare ServerApi: { value: number, call: () -> () }\nfunction ServerCallback() end",
+    )
+    .unwrap();
     for source in [
         "local value = ServerApi.value",
         "ServerApi.call()",
@@ -439,7 +446,7 @@ fn project_check_uses_unsaved_declaration_text() {
     .unwrap();
     fs::write(
 		root.join("luat.toml"),
-		"[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\n",
+		"[project]\nname='test'\n[fivem]\nshared=['types/*.d.luat']\nclient=['src/client/main.luat']\n",
 	)
 	.unwrap();
     let project = Project::load(&root).unwrap();
@@ -509,6 +516,96 @@ fn includes_transitive_imports_from_manifest_entries() {
         "dist/shared/two.lua",
     ] {
         assert!(root.join(path).exists(), "missing {path}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn orders_explicit_glob_entries_through_an_implicit_import() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/shared/helpers")).unwrap();
+    fs::write(
+        root.join("src/shared/a.luat"),
+        "print(import('./helpers/b'))",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/shared/helpers/b.luat"),
+        "return import('../z')",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared/z.luat"), "return 42").unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nshared=['src/shared/*.luat']\n",
+    )
+    .unwrap();
+
+    let project = Project::load(&root).unwrap();
+    project.check().unwrap();
+    project.build().unwrap();
+    let manifest = fs::read_to_string(root.join("fxmanifest.lua")).unwrap();
+    let dependency = manifest.find("dist/_luat/entries/shared/z.lua").unwrap();
+    let consumer = manifest.find("dist/_luat/entries/shared/a.lua").unwrap();
+    assert!(dependency < consumer, "{manifest}");
+    assert!(manifest.contains("dist/shared/helpers/b.lua"), "{manifest}");
+    assert!(
+        !manifest.contains("dist/_luat/entries/shared/helpers/b.lua"),
+        "{manifest}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rejects_installed_package_files_in_script_lists() {
+    let root = temp_project();
+    let module = ".luat/packages/example/1.0.0/init.lua";
+    fs::create_dir_all(root.join(module).parent().unwrap()).unwrap();
+    fs::write(root.join(module), "return {}").unwrap();
+    for pattern in [module, "**/init.lua"] {
+        fs::write(
+            root.join("luat.toml"),
+            format!("[project]\nname='test'\n[fivem]\nshared=['{pattern}']\n"),
+        )
+        .unwrap();
+        let Err(error) = Project::load(&root) else {
+            panic!("accepted {pattern}")
+        };
+        assert!(
+            error.to_string().contains("cannot be listed as a script"),
+            "{error}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_imports_keep_the_last_successful_build() {
+    let root = temp_project();
+    let shared = root.join("src/shared");
+    let server = root.join("src/server");
+    fs::create_dir_all(&shared).unwrap();
+    fs::create_dir_all(&server).unwrap();
+    let importer = shared.join("main.luat");
+    fs::write(&importer, "print('valid')").unwrap();
+    fs::write(shared.join("cycle.luat"), "return import('./main')").unwrap();
+    fs::write(server.join("private.luat"), "return 42").unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[fivem]\nshared=['src/shared/main.luat']\nserver=['src/server/private.luat']\n").unwrap();
+    let project = Project::load(&root).unwrap();
+    project.build().unwrap();
+    let output = root.join("dist/shared/main.lua");
+    let original = fs::read(&output).unwrap();
+    for (specifier, code) in [
+        ("./missing", "LT4003"),
+        ("./cycle", "LT4005"),
+        ("../server/private", "LT4006"),
+    ] {
+        fs::write(&importer, format!("return import('{specifier}')")).unwrap();
+        for error in [project.check().unwrap_err(), project.build().unwrap_err()] {
+            let (_, diagnostic) = main_diagnostic(&error);
+            assert_eq!(diagnostic.code, code, "{error}");
+        }
+        assert_eq!(fs::read(&output).unwrap(), original);
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -758,9 +855,17 @@ fn imported_exports_use_declarations_and_each_execution_context() {
     fs::create_dir_all(root.join("src/client")).unwrap();
     fs::create_dir_all(root.join("src/server")).unwrap();
     fs::create_dir_all(root.join("types")).unwrap();
-    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[compiler]\ndeclarations=['types/*.d.luat']\n[fivem]\nclient=['src/client/main.luat']\nserver=['src/server/main.luat']\n").unwrap();
-    fs::write(root.join("types/client.d.luat"), "---@client\ntypedef Platform = string\ndeclare PlatformValue: Platform\ndeclare OtherValue: number").unwrap();
-    fs::write(root.join("types/server.d.luat"), "---@server\ntypedef Platform = number\ndeclare PlatformValue: Platform\ndeclare OtherValue: string").unwrap();
+    fs::write(root.join("luat.toml"), "[project]\nname='test'\n[fivem]\nclient=['types/client.d.luat', 'src/client/main.luat']\nserver=['types/server.d.luat', 'src/server/main.luat']\n").unwrap();
+    fs::write(
+        root.join("types/client.d.luat"),
+        "typedef Platform = string\ndeclare PlatformValue: Platform\ndeclare OtherValue: number",
+    )
+    .unwrap();
+    fs::write(
+        root.join("types/server.d.luat"),
+        "typedef Platform = number\ndeclare PlatformValue: Platform\ndeclare OtherValue: string",
+    )
+    .unwrap();
     fs::write(root.join("src/shared/value.luat"), "return PlatformValue").unwrap();
     fs::write(
         root.join("src/shared/api.luat"),

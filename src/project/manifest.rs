@@ -43,11 +43,14 @@ fn validate_manifest_path(
     }
     let relative = Path::new(value);
     validate_project_path(relative, config)?;
+    if script && managed_package_path(relative) {
+        return Err(package_script_error(config, value));
+    }
     let luat = relative
         .extension()
         .is_some_and(|extension| extension == "luat")
         || value.contains(".luat");
-    if luat && !relative.starts_with("src") {
+    if luat && !script && !relative.starts_with("src") {
         return Err(BuildError::Configuration {
             path: config.to_path_buf(),
             message: format!("LuaT manifest paths must be under src/: {value}"),
@@ -114,18 +117,23 @@ fn validate_manifest_path(
                 ),
             });
         }
-        if script
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "luat")
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".d.luat"))
-        {
-            return Err(BuildError::Configuration {
-                path: config.to_path_buf(),
-                message: format!("declaration files cannot be loaded as runtime scripts: {value}"),
-            });
+        if script {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if managed_package_path(relative) {
+                return Err(package_script_error(
+                    config,
+                    &relative.display().to_string(),
+                ));
+            }
+            if path.extension().is_some_and(|ext| ext == "luat")
+                && !is_declaration_path(&relative.to_string_lossy())
+                && !relative.starts_with("src")
+            {
+                return Err(BuildError::Configuration {
+                    path: config.to_path_buf(),
+                    message: format!("LuaT runtime scripts must be under src/: {value}"),
+                });
+            }
         }
         if !script
             && path
@@ -145,6 +153,29 @@ fn validate_manifest_path(
         });
     }
     Ok(())
+}
+
+fn managed_package_path(path: &Path) -> bool {
+    let mut components = path.components();
+    components
+        .next()
+        .is_some_and(|part| part.as_os_str().eq_ignore_ascii_case(".luat"))
+        && components
+            .next()
+            .is_some_and(|part| part.as_os_str().eq_ignore_ascii_case("packages"))
+}
+
+fn package_script_error(config: &Path, value: &str) -> BuildError {
+    BuildError::Configuration {
+        path: config.to_path_buf(),
+        message: format!(
+            "installed package file '{value}' cannot be listed as a script; use [dependencies] and import(...)"
+        ),
+    }
+}
+
+pub(super) fn is_declaration_path(path: &str) -> bool {
+    path.ends_with(".d.luat") && !path.starts_with('@') && !path.contains("://")
 }
 
 pub(super) fn is_builtin_manifest_key(key: &str) -> bool {
@@ -345,6 +376,9 @@ pub(super) fn render_manifest_with_scripts(
         let mut values = if key == "escrow_ignore" {
             let mut resolved = Vec::new();
             for value in values {
+                if is_declaration_path(value) {
+                    continue;
+                }
                 let matches = resolved_manifest_paths(
                     std::slice::from_ref(value),
                     root,
@@ -466,6 +500,7 @@ fn resolved_manifest_paths(
 ) -> Result<Vec<String>, String> {
     Ok(expanded_paths(values, root, allow_directory)?
         .into_iter()
+        .filter(|value| !is_declaration_path(value))
         .map(|value| manifest_path(&value, out_dir))
         .collect())
 }
@@ -505,6 +540,24 @@ pub(super) fn expanded_paths(
 #[cfg(test)]
 mod package_escrow_tests {
     use super::*;
+
+    #[test]
+    fn runtime_asset_globs_omit_declarations() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target/tests/assets-with-declarations");
+        fs::create_dir_all(root.join("types")).unwrap();
+        fs::write(root.join("types/api.d.luat"), "typedef Api = string").unwrap();
+        fs::write(root.join("types/metadata.json"), "{}").unwrap();
+        let config = toml::from_str(
+            "[project]\nname='test'\n[fivem]\nshared=['types/*.d.luat']\nfiles=['types/**/*']\n",
+        )
+        .unwrap();
+        let manifest = render_manifest(&config, &root).unwrap();
+        assert!(!manifest.contains("api.d.luat"), "{manifest}");
+        assert!(manifest.contains("types/metadata.json"), "{manifest}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn generated_package_ignores_do_not_require_existing_outputs() {
