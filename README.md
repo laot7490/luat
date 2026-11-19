@@ -53,10 +53,10 @@ The build writes the compiled scripts to `dist/` and creates `fxmanifest.lua` in
 
 | Command                    | What it does                                                                  |
 | -------------------------- | ----------------------------------------------------------------------------- |
-| `luat create [directory]`  | Creates starter project files in the current or a named directory.            |
+| `luat create [directory?]` | Creates starter project files in the current or a named directory.            |
 | `luat check`               | Checks the project's scripts and reports issues it finds.                     |
 | `luat build`               | Builds the scripts and FiveM resource manifest.                               |
-| `luat watch [directory]`   | Builds the project and rebuilds it when source or configuration files change. |
+| `luat watch [directory?]`  | Builds the project and rebuilds it when source or configuration files change. |
 | `luat add <package>`       | Adds a community package to the project.                                      |
 | `luat install`             | Restores the package versions recorded in `luat.toml`.                        |
 | `luat update [package]`    | Updates dependencies within their declared version ranges.                    |
