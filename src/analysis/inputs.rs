@@ -285,15 +285,31 @@ mod tests {
         let checked = host.snapshot();
         let editor = host.editor_snapshot();
         assert_eq!(checked.hover(&main, 7), editor.hover(&main, 7));
-        let changed = format!("{source}\napi.");
+        let changed = source.replace("api.read('hello')", "print(api.)");
         host.set_file(main.clone(), changed.clone());
         let editor = host.editor_snapshot();
         assert!(
             editor
-                .completions(&main, changed.len())
+                .completions(&main, changed.len() - 1)
                 .iter()
                 .any(|item| item.label == "read")
         );
+        let checked = host.snapshot();
+        assert!(
+            checked
+                .completions(&main, changed.len() - 1)
+                .iter()
+                .any(|item| item.label == "read")
+        );
+        host.set_file(api.clone(), "return { renamed = true }".into());
+        assert!(!host.editor_project_context_current(&main));
+        let refreshed = host.snapshot();
+        let labels: Vec<_> = refreshed
+            .completions(&main, changed.len() - 1)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(labels, ["renamed"]);
         fs::remove_dir_all(root).unwrap();
     }
 

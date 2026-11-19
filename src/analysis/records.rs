@@ -317,9 +317,6 @@ impl AnalysisSnapshot {
         let prefix = completion_prefix(&file.source, offset);
         let before = file.source[..offset - prefix.len()].trim_end();
         let (fields, written) = if let Some(before) = before.strip_suffix('.') {
-            if self.imported_member_completions(path, offset).is_some() {
-                return None;
-            }
             let expression = self.receiver_expression(&file.source, before.len())?;
             let (context, ty) = self.receiver_type(path, offset, expression)?;
             let fields = self.record_fields(&context, offset, &ty);

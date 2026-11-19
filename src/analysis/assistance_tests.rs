@@ -201,8 +201,8 @@ fn signature_help_selects_innermost_call_and_returns_to_outer() {
 #[test]
 fn standard_lua_declarations_are_indexed_and_navigable() {
     for text in [
-        include_str!("../../lsp/definitions/lua-shared.d.luat"),
-        include_str!("../../lsp/definitions/lua-server.d.luat"),
+        crate::definitions::LUA_SHARED,
+        crate::definitions::LUA_SERVER,
     ] {
         crate::compiler::declarations::parse_declaration_file(text).unwrap();
     }
@@ -456,14 +456,8 @@ fn signature_help_handles_method_self_and_rejects_non_calls() {
 fn standard_inventory_is_complete_and_declarations_validate() {
     let mut sources = Vec::new();
     for (name, text) in [
-        (
-            "lua-shared.d.luat",
-            include_str!("../../lsp/definitions/lua-shared.d.luat"),
-        ),
-        (
-            "lua-server.d.luat",
-            include_str!("../../lsp/definitions/lua-server.d.luat"),
-        ),
+        ("lua-shared.d.luat", crate::definitions::LUA_SHARED),
+        ("lua-server.d.luat", crate::definitions::LUA_SERVER),
     ] {
         for line in text.lines() {
             if let Some(name) = line
