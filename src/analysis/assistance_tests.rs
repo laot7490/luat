@@ -385,6 +385,22 @@ fn unfinished_template_keeps_semantic_tokens_and_document_symbols() {
                 .any(|symbol| symbol.name == "name")
         );
     }
+    let source = "local name = 'Ada'\nprint(`🚀 {name`)";
+    let (snapshot, path) = analyze(source);
+    let diagnostics = snapshot.diagnostics(&path).unwrap();
+    let error = crate::compile_source(source).unwrap_err();
+    let message = "Expected '}' to close template interpolation.";
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == message)
+    );
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == message)
+    );
 }
 
 #[test]

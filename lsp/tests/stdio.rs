@@ -51,7 +51,7 @@ fn stdio_editor_assistance_providers_and_markdown() {
             .to_string_lossy()
             .replace('\\', "/")
     );
-    let source = "---[Native Documentation](https://docs.fivem.net/natives/?_0xE7490533)\n---@param value Açıklama\n---@deprecated Use replacement.\nlocal function old(value: number, unused: string) return value end\nlocal count = 1\nold(2, 'x')\nold(2, 'x')\nlocal greeting = `🚀 {count`";
+    let source = "---[Native Documentation](https://docs.fivem.net/natives/?_0xE7490533)\n---@param value Açıklama\n---@deprecated Use replacement.\nlocal function old(value: number, unused: string) return value end\nlocal count = 1\nold(2, 'x')\nold(2, 'x')";
     send_message(
         &mut input,
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri,"languageId":"luat","version":1,"text":source}}}),
@@ -108,17 +108,6 @@ fn stdio_editor_assistance_providers_and_markdown() {
     }
     send_message(
         &mut input,
-        json!({"jsonrpc":"2.0","id":9,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":uri}}}),
-    );
-    let tokens = receive_response(&receiver, 9);
-    assert!(
-        tokens["result"]["data"]
-            .as_array()
-            .is_some_and(|data| !data.is_empty()),
-        "{tokens}"
-    );
-    send_message(
-        &mut input,
         json!({"jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{"settings":{"luat":{"diagnostics":{"unusedParameters":false,"unusedLocals":false},"inlayHints":{"parameterNames":{"enabled":false},"variableTypes":{"enabled":false}}}}}}),
     );
     loop {
@@ -145,6 +134,50 @@ fn stdio_editor_assistance_providers_and_markdown() {
         json!({"jsonrpc":"2.0","id":8,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":7,"character":0}}}}),
     );
     assert_eq!(receive_response(&receiver, 8)["result"], json!([]));
+    let incomplete_uri = uri.replace("editor-assistance.luat", "unfinished-template.luat");
+    send_message(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":incomplete_uri,"languageId":"luat","version":1,"text":"local count = 1\nlocal greeting = `🚀 {count`"}}}),
+    );
+    loop {
+        let message = receive(&receiver);
+        if message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == incomplete_uri
+        {
+            assert!(
+                message["params"]["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|diagnostic| {
+                        diagnostic["code"] == "LT1001"
+                            && diagnostic["message"]
+                                == "Expected '}' to close template interpolation."
+                    }),
+                "{message}"
+            );
+            break;
+        }
+    }
+    for (id, method) in [
+        (9, "textDocument/semanticTokens/full"),
+        (10, "textDocument/documentSymbol"),
+    ] {
+        send_message(
+            &mut input,
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"textDocument":{"uri":incomplete_uri}}}),
+        );
+        let response = receive_response(&receiver, id);
+        let result = if id == 9 {
+            &response["result"]["data"]
+        } else {
+            &response["result"]
+        };
+        assert!(
+            result.as_array().is_some_and(|values| !values.is_empty()),
+            "{response}"
+        );
+    }
     send_message(
         &mut input,
         json!({"jsonrpc":"2.0","id":7,"method":"shutdown","params":null}),

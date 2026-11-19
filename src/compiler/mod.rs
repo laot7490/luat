@@ -20,10 +20,11 @@ pub(crate) struct ParsedSource {
 impl ParsedSource {
     pub fn new_prepared(source: &str, prepared: syntax::PreparedSource) -> Self {
         let parsed = full_moon::parse_fallible(&prepared.text, LuaVersion::cfxlua().with_luau());
-        let syntax_valid = parsed.errors().is_empty();
+        let syntax_valid = parsed.errors().is_empty() && prepared.template_diagnostics.is_empty();
         let mut diagnostics = parser_diagnostics(parsed.errors(), "", source, |offset| {
             prepared.original_offset(offset)
         });
+        diagnostics.extend(prepared.template_diagnostics.iter().cloned());
         if let Some(error) = syntax::invalid_type_alias_error(source) {
             diagnostics.extend(error.diagnostics);
         }

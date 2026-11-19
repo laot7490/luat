@@ -13,6 +13,7 @@ use full_moon::{
 pub(crate) struct PreparedSource {
     pub text: String,
     pub coalesce_operators: HashSet<usize>,
+    pub template_diagnostics: Vec<Diagnostic>,
     original_offsets: Vec<usize>,
 }
 
@@ -26,7 +27,19 @@ impl PreparedSource {
 }
 
 pub(crate) fn prepare(source: &str) -> PreparedSource {
-    let (expanded, template_offsets) = expand_templates(source);
+    let (expanded, template_offsets, unclosed) = expand_templates(source);
+    let template_diagnostics = unclosed
+        .into_iter()
+        .map(|offset| {
+            Diagnostic::range(
+                source,
+                offset,
+                offset + 1,
+                "LT1001",
+                "Expected '}' to close template interpolation.".to_owned(),
+            )
+        })
+        .collect();
     let typedefs = normalize_typedef_declarations(&expanded);
     let (arrays, array_offsets) = normalize_type_syntax(&typedefs, true);
     let (optional, optional_offsets) = normalize_optional_fields(&arrays);
@@ -43,6 +56,7 @@ pub(crate) fn prepare(source: &str) -> PreparedSource {
             return PreparedSource {
                 text: source.to_owned(),
                 coalesce_operators: HashSet::new(),
+                template_diagnostics,
                 original_offsets: source_offsets,
             };
         }
@@ -51,6 +65,7 @@ pub(crate) fn prepare(source: &str) -> PreparedSource {
     let mut prepared = PreparedSource {
         text: String::with_capacity(source.len() + operators.len()),
         coalesce_operators: HashSet::with_capacity(operators.len()),
+        template_diagnostics,
         original_offsets: Vec::with_capacity(source.len() + operators.len() + 1),
     };
     prepared.original_offsets.push(0);
@@ -410,12 +425,13 @@ pub(crate) fn invalid_type_alias_error(source: &str) -> Option<CompileError> {
     (!diagnostics.is_empty()).then_some(CompileError { diagnostics })
 }
 
-fn expand_templates(source: &str) -> (String, Vec<usize>) {
+fn expand_templates(source: &str) -> (String, Vec<usize>, Vec<usize>) {
     if !source.contains('`') {
-        return (source.to_owned(), (0..=source.len()).collect());
+        return (source.to_owned(), (0..=source.len()).collect(), Vec::new());
     }
     let mut output = String::with_capacity(source.len());
     let mut offsets = vec![0];
+    let mut unclosed = Vec::new();
     let mut cursor = 0;
     let mut i = 0;
     while i < source.len() {
@@ -450,7 +466,8 @@ fn expand_templates(source: &str) -> (String, Vec<usize>) {
             if body.contains('{') {
                 append_source(source, cursor..i, 0, &mut output, &mut offsets);
                 *offsets.last_mut().unwrap() = i;
-                let (expanded, mut expanded_offsets) = expand_template_body(body, i + 1);
+                let (expanded, mut expanded_offsets) =
+                    expand_template_body(body, i + 1, &mut unclosed);
                 output.push_str(&expanded);
                 offsets.extend(expanded_offsets.drain(1..));
                 *offsets.last_mut().unwrap() = end + 1;
@@ -463,7 +480,7 @@ fn expand_templates(source: &str) -> (String, Vec<usize>) {
         i += c.len_utf8();
     }
     append_source(source, cursor..source.len(), 0, &mut output, &mut offsets);
-    (output, offsets)
+    (output, offsets, unclosed)
 }
 
 fn quoted_end(s: &str, start: usize, q: u8) -> usize {
@@ -509,7 +526,11 @@ fn c_style_comment_end(source: &str, start: usize) -> usize {
         .map_or(source.len(), |offset| start + 2 + offset + 2)
 }
 
-fn expand_template_body(body: &str, source_start: usize) -> (String, Vec<usize>) {
+fn expand_template_body(
+    body: &str,
+    source_start: usize,
+    unclosed: &mut Vec<usize>,
+) -> (String, Vec<usize>) {
     let mut output = String::new();
     let mut offsets = vec![source_start];
     push_generated(&mut output, &mut offsets, "(", source_start);
@@ -527,6 +548,9 @@ fn expand_template_body(body: &str, source_start: usize) -> (String, Vec<usize>)
         }
         let start = open + 1;
         let close = find_interpolation_end(body, start).unwrap_or(body.len());
+        if close == body.len() {
+            unclosed.push(source_start + open);
+        }
         pos = close + usize::from(close < body.len());
         if start == close {
             if part_count > 0 {
@@ -905,7 +929,7 @@ mod tests {
             "typedef P = { name: string }\nlocal text = `hello {name}`\nlocal bad: P = {}\n-- trailing comment",
             "typedef P = { name: string, maybe?: number }\nlocal a = `ü {name}`\nlocal b = `value ${name}`\nlocal fallback = item ?? nil\nlocal bad: P = {}\n-- tail",
         ] {
-            let (expanded, template_offsets) = expand_templates(source);
+            let (expanded, template_offsets, _) = expand_templates(source);
             assert_eq!(template_offsets.len(), expanded.len() + 1);
             let prepared = prepare(source);
             let prepared_record = prepared.text.rfind("{}").unwrap();
@@ -936,7 +960,7 @@ mod tests {
     fn preserves_interpolation_and_multiline_template_boundaries() {
         let source =
             "local a = `ü {first} and $ {second}`\nlocal b = `line one\n{third}`\n-- trailing";
-        let (expanded, offsets) = expand_templates(source);
+        let (expanded, offsets, _) = expand_templates(source);
 
         for value in ["first", "second", "third"] {
             let expanded_start = expanded.find(value).unwrap();
@@ -959,7 +983,7 @@ mod tests {
     #[test]
     fn does_not_expand_templates_inside_lua_long_strings_or_comments() {
         let source = "local text = [=[ `ignored {value}` ]=]\n--[==[ `ignored {value}` ]==]\nlocal actual = `hello {name}`";
-        let (expanded, _) = expand_templates(source);
+        let (expanded, _, _) = expand_templates(source);
 
         assert!(expanded.contains("[=[ `ignored {value}` ]=]"));
         assert!(expanded.contains("--[==[ `ignored {value}` ]==]"));
@@ -969,7 +993,7 @@ mod tests {
     #[test]
     fn does_not_expand_templates_inside_c_style_comments() {
         let source = "local ignored = 1 /* `ignored {value}` */\nlocal actual = `{(function() /* } ignored */ return 1 end)()}`";
-        let (expanded, _) = expand_templates(source);
+        let (expanded, _, _) = expand_templates(source);
 
         assert!(expanded.contains("/* `ignored {value}` */"));
         assert!(expanded.contains("/* } ignored */ return 1 end)()"));
@@ -978,7 +1002,7 @@ mod tests {
     #[test]
     fn interpolation_end_skips_braces_inside_lua_comments_and_long_strings() {
         let source = "local text = `{(function() -- } ignored\n return [=[ } ]=] end)()}`";
-        let (expanded, _) = expand_templates(source);
+        let (expanded, _, _) = expand_templates(source);
 
         assert!(expanded.contains("-- } ignored\n return [=[ } ]=] end)()"));
         assert!(expanded.ends_with(')'));
