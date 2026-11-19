@@ -557,6 +557,39 @@ fn orders_explicit_glob_entries_through_an_implicit_import() {
 }
 
 #[test]
+fn keeps_opaque_scripts_before_their_dependent_module_when_reordering_imports() {
+    let root = temp_project();
+    fs::create_dir_all(root.join("src/shared")).unwrap();
+    fs::write(
+        root.join("src/shared/main.luat"),
+        "function initialize() return import('./config') end",
+    )
+    .unwrap();
+    fs::write(root.join("src/shared/config.luat"), "return lib").unwrap();
+    fs::write(root.join("bootstrap.lua"), "lib = {}").unwrap();
+    fs::write(
+        root.join("luat.toml"),
+        "[project]\nname='test'\n[fivem]\nshared=['src/shared/main.luat', '@ox_lib/init.lua', 'bootstrap.lua', 'src/shared/config.luat']\n",
+    )
+    .unwrap();
+
+    Project::load(&root).unwrap().build().unwrap();
+    let manifest = fs::read_to_string(root.join("fxmanifest.lua")).unwrap();
+    let order = [
+        "@ox_lib/init.lua",
+        "bootstrap.lua",
+        "dist/_luat/entries/shared/config.lua",
+        "dist/_luat/entries/shared/main.lua",
+    ];
+    let offsets = order.map(|entry| manifest.find(entry).unwrap());
+    assert!(
+        offsets.windows(2).all(|pair| pair[0] < pair[1]),
+        "{manifest}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rejects_installed_package_files_in_script_lists() {
     let root = temp_project();
     let module = ".luat/packages/example/1.0.0/init.lua";

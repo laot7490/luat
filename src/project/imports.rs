@@ -253,24 +253,47 @@ fn ordered_entries<'a>(
     paths: &'a [String],
     modules: &BTreeMap<String, Module>,
 ) -> Result<Vec<&'a str>, BuildError> {
-    let explicit: HashMap<_, _> = paths
-        .iter()
-        .filter_map(|path| entry_id(path).map(|id| (id, path.as_str())))
-        .collect();
-    let mut complete = HashSet::new();
-    let mut dependencies = Vec::new();
-    let mut entries = Vec::new();
+    let mut explicit = HashMap::new();
+    let mut barriers = Vec::new();
     for path in paths {
         if let Some(id) = entry_id(path).filter(|id| modules.contains_key(*id)) {
-            visit_cycle(id, modules, &mut complete, &mut dependencies)?;
-            entries.extend(
-                dependencies
-                    .drain(..)
-                    .filter_map(|id| explicit.get(id.as_str()).copied()),
-            );
+            explicit
+                .entry(id)
+                .or_insert((path.as_str(), barriers.len()));
         } else {
-            entries.push(path);
+            barriers.push(path.as_str());
         }
+    }
+    let mut complete = HashSet::new();
+    let mut order = Vec::new();
+    for path in paths {
+        if let Some(id) = entry_id(path).filter(|id| modules.contains_key(*id)) {
+            visit_cycle(id, modules, &mut complete, &mut order)?;
+        }
+    }
+    let mut segments = HashMap::new();
+    let mut groups = vec![Vec::new(); barriers.len() + 1];
+    for id in &order {
+        let dependency_segment = modules[id]
+            .edges
+            .iter()
+            .map(|(_, dependency)| segments[dependency.as_str()])
+            .max()
+            .unwrap_or_default();
+        let segment = if let Some(&(path, original_segment)) = explicit.get(id.as_str()) {
+            // Delay importers across opaque scripts without bringing their dependencies forward.
+            let segment = original_segment.max(dependency_segment);
+            groups[segment].push(path);
+            segment
+        } else {
+            dependency_segment
+        };
+        segments.insert(id.as_str(), segment);
+    }
+    let mut entries = Vec::with_capacity(paths.len());
+    for (i, group) in groups.into_iter().enumerate() {
+        entries.extend(group);
+        entries.extend(barriers.get(i).copied());
     }
     Ok(entries)
 }
