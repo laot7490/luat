@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -46,24 +45,9 @@ pub fn check_package(root: &Path) -> Result<(), crate::BuildError> {
         .map(|_| ())
 }
 fn ask(label: &str, default: Option<&str>) -> Result<String, (u8, String)> {
-    let mut stdout = io::stdout().lock();
-    write!(
-        stdout,
-        "{label}{}: ",
-        default.map_or(String::new(), |v| format!(" ({v})"))
-    )
-    .map_err(err)?;
-    stdout.flush().map_err(err)?;
-    let mut value = String::new();
-    if io::stdin().read_line(&mut value).map_err(err)? == 0 {
-        return Err(err("input ended before package setup was complete"));
-    }
-    let value = value.trim();
-    Ok(if value.is_empty() {
-        default.unwrap_or("").to_owned()
-    } else {
-        value.to_owned()
-    })
+    crate::output::read_prompt(label, default)
+        .map_err(err)?
+        .ok_or_else(|| err("input ended before package setup was complete"))
 }
 fn init(base: &Path) -> Result<(), (u8, String)> {
     let name = loop {
@@ -120,7 +104,7 @@ fn create(
     }
     fs::create_dir_all(&root).map_err(err)?;
     let manifest = format!(
-        "name = {name:?}\nversion = {version:?}\nauthor = {author:?}\ndescription = {description:?}\nlicense = {license:?}\n\nshared = [\"init.luat\"]\nclient = []\nserver = []\ndeclarations = []\n\n[dependencies]\n"
+        "name = {name:?}\nversion = {version:?}\nauthor = {author:?}\ndescription = {description:?}\nlicense = {license:?}\n\nshared = [\"init.luat\"]\nclient = []\nserver = []\n\n[dependencies]\n"
     );
     fs::write(root.join("luat-package.toml"), manifest).map_err(err)?;
     fs::write(root.join("init.luat"), "return {}\n").map_err(err)?;

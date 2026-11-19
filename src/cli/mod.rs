@@ -319,13 +319,13 @@ fn is_internal_error(error: &luat::CompileError) -> bool {
 }
 
 fn usage() -> &'static str {
-    "Usage: luat <command> [options]\n\nCommands:\n  check                   Check project scripts\n  build                   Compile project scripts\n  watch [directory]       Build and rebuild when source files change\n  create [directory]      Create a project in the given directory\n  add <package[@version]> Add or update packages\n  install                 Install packages from the manifest and lock\n  update [package ...]    Update dependencies within their version ranges\n  remove <package>        Remove a direct dependency\n  package <init|check>     Develop packages\n\nOptions for install:\n  --locked               Require an unchanged luat.lock\n\nOptions for check/build/package/add/install/update/remove:\n  --project <path>        Select a configuration or directory (default: current directory)\n  --pretty false          Print plain output without styling\n\nOptions:\n  -h, --help              Display this help\n  -V, --version           Display this version"
+    "Usage: luat <command> [options]\n\nCommands:\n  check                   Check project scripts\n  build                   Compile project scripts\n  watch [directory]       Build and rebuild when source files change\n  create [name]           Set up a LuaT project interactively\n  add <package[@version]> Add or update packages\n  install                 Install packages from the manifest and lock\n  update [package ...]    Update dependencies within their version ranges\n  remove <package>        Remove a direct dependency\n  package <init|check>     Develop packages\n\nOptions for install:\n  --locked               Require an unchanged luat.lock\n\nOptions for check/build/package/add/install/update/remove:\n  --project <path>        Select a configuration or directory (default: current directory)\n  --pretty false          Print plain output without styling\n\nOptions:\n  -h, --help              Display this help\n  -V, --version           Display this version"
 }
 
 fn command_usage(command: &str) -> String {
     let syntax = match command {
         "package" => "package <init|check> [--project <path>] [--pretty false]".to_owned(),
-        "create" => "create [directory] [--pretty false]".to_owned(),
+        "create" => "create [name] [--pretty false]".to_owned(),
         "watch" => "watch [directory] [--pretty false]".to_owned(),
         "add" => "add <package[@version] ...> [--project <path>] [--pretty false]".to_owned(),
         "remove" => "remove <package ...> [--project <path>] [--pretty false]".to_owned(),

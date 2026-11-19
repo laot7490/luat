@@ -1,4 +1,27 @@
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
+
+#[doc(hidden)]
+pub fn read_prompt(label: &str, default: Option<&str>) -> io::Result<Option<String>> {
+    {
+        let mut stdout = io::stdout().lock();
+        write!(stdout, "{label}")?;
+        if let Some(default) = default {
+            write!(stdout, " ({default})")?;
+        }
+        write!(stdout, ": ")?;
+        stdout.flush()?;
+    }
+    let mut value = String::new();
+    if io::stdin().read_line(&mut value)? == 0 {
+        return Ok(None);
+    }
+    let value = value.trim();
+    Ok(Some(if value.is_empty() {
+        default.unwrap_or("").to_owned()
+    } else {
+        value.to_owned()
+    }))
+}
 
 thread_local! { static PRETTY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
 
